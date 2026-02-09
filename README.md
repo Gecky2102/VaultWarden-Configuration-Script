@@ -1,4 +1,4 @@
-# VaultWarden-Configuration-Script
+# VaultWarden Configuration Script by Gecky2102
 
 A comprehensive, automated Bash script for deploying and configuring Vaultwarden EE on Linux systems.
 

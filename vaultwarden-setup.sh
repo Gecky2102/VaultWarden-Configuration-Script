@@ -52,7 +52,7 @@ print_header() {
     clear
     echo -e "${PURPLE}${BOLD}"
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "           Vaultwarden EE Configuration Script"
+    echo "      VaultWarden Configuration Script by Gecky2102"
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "${NC}"
 }
@@ -306,6 +306,17 @@ get_user_input() {
         read -sp "SMTP Password: " SMTP_PASS
         echo ""
         read -p "SMTP From Address: " SMTP_FROM
+        
+        # Validate SMTP fields if user chose to configure SMTP
+        if [ -z "$SMTP_HOST" ] || [ -z "$SMTP_FROM" ]; then
+            print_warning "SMTP_HOST and SMTP_FROM are required for email support"
+            print_info "Disabling SMTP configuration..."
+            SMTP_ENABLED="false"
+        else
+            SMTP_ENABLED="true"
+        fi
+    else
+        SMTP_ENABLED="false"
     fi
     
     echo ""
@@ -409,6 +420,16 @@ ROCKET_ADDRESS=127.0.0.1
 SSL_CERT_PATH=$SSL_CERT
 SSL_KEY_PATH=$SSL_KEY
 
+# Security Settings
+ROCKET_WORKERS=10
+SHOW_PASSWORD_HINT=false
+PASSWORD_ITERATIONS=600000
+EOF
+
+    # Add SMTP configuration only if enabled
+    if [ "$SMTP_ENABLED" = "true" ]; then
+        cat >> "$ENV_FILE" << EOF
+
 # SMTP Configuration
 SMTP_HOST=$SMTP_HOST
 SMTP_FROM=$SMTP_FROM
@@ -416,12 +437,8 @@ SMTP_PORT=$SMTP_PORT
 SMTP_SECURITY=starttls
 SMTP_USERNAME=$SMTP_USER
 SMTP_PASSWORD=$SMTP_PASS
-
-# Security Settings
-ROCKET_WORKERS=10
-SHOW_PASSWORD_HINT=false
-PASSWORD_ITERATIONS=600000
 EOF
+    fi
 
     chmod 600 "$ENV_FILE"
     
