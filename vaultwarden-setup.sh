@@ -414,11 +414,7 @@ SIGNUPS_ALLOWED=true
 INVITATIONS_ALLOWED=true
 ADMIN_TOKEN=$ADMIN_TOKEN
 ROCKET_PORT=8000
-ROCKET_ADDRESS=127.0.0.1
-
-# SSL Configuration
-SSL_CERT_PATH=$SSL_CERT
-SSL_KEY_PATH=$SSL_KEY
+ROCKET_ADDRESS=0.0.0.0
 
 # Security Settings
 ROCKET_WORKERS=10
@@ -473,8 +469,6 @@ ExecStart=/usr/bin/docker run \\
     --name vaultwarden \\
     --rm \\
     -v $DATA_DIR:/data \\
-    -v $SSL_CERT:/ssl/cert.pem:ro \\
-    -v $SSL_KEY:/ssl/key.pem:ro \\
     --env-file $ENV_FILE \\
     -p 127.0.0.1:8000:8000 \\
     vaultwarden/server:$VW_VERSION
@@ -813,7 +807,11 @@ print_summary() {
     echo "  🔐 Admin Panel: https://$DOMAIN/admin"
     echo "  🔑 Admin Token: Saved in $ADMIN_KEY_FILE"
     echo ""
-    echo -e "${BOLD}Useful Commands:${NC}"
+    echo -e "${YELLOW}${BOLD}⚠ IMPORTANT: Load aliases first!${NC}"
+    echo "  Run this command to enable management aliases:"
+    echo -e "  ${CYAN}source ~/.bashrc${NC}"
+    echo ""
+    echo -e "${BOLD}Useful Commands (after loading aliases):${NC}"
     echo "  vw-start      - Start Vaultwarden"
     echo "  vw-stop       - Stop Vaultwarden"
     echo "  vw-restart    - Restart Vaultwarden"
@@ -823,6 +821,8 @@ print_summary() {
     echo "  vw-backup     - Create manual backup"
     echo "  vw-config     - Edit configuration"
     echo "  vw-admin-key  - Display admin token"
+    echo "  vw-cleanup    - Stop and remove containers"
+    echo "  vw-diagnose   - Run diagnostics"
     echo ""
     echo -e "${BOLD}Important Files:${NC}"
     echo "  📁 Data Directory: $DATA_DIR"
