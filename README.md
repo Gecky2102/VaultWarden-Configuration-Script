@@ -72,7 +72,7 @@ The script creates convenient aliases for Vaultwarden management:
 
 1. Download the script:
 ```bash
-wget https://raw.githubusercontent.com/YOUR_USERNAME/VaultWarden-Configuration-Script/main/vaultwarden-setup.sh
+wget https://raw.githubusercontent.com/gecky2102/VaultWarden-Configuration-Script/main/vaultwarden-setup.sh
 ```
 
 2. Make it executable:
@@ -338,3 +338,6 @@ For issues and questions:
 ## Disclaimer
 
 This script is provided as-is, without any warranties. Always review scripts before running them with root privileges. Test in a non-production environment first.
+
+## Credits
+Created with ❤️ by [gecky2102](https://gmasiero.it)
