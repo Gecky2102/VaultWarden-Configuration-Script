@@ -145,11 +145,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Test help/version output (dry run)
+      - name: Test script functions without execution
         run: |
-          echo "Testing script can be sourced..."
-          bash -c "source vaultwarden-setup.sh; declare -F | head -5"
-          echo "✓ Script functions can be loaded"
+          echo "Testing script structure..."
+          # Extract and test function definitions without executing main
+          sed -n '/^[a-z_]*() {/,/^}/p' vaultwarden-setup.sh > /tmp/functions.sh
+          bash -n /tmp/functions.sh
+          echo "✓ All functions have valid syntax"
 
       - name: Verify required functions exist
         run: |

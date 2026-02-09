@@ -32,7 +32,6 @@ ADMIN_KEY_FILE="/root/vaultwarden-admin-key.txt"
 # Default configuration
 VAULTWARDEN_DIR="/opt/vaultwarden"
 DATA_DIR="/var/lib/vaultwarden"
-CONFIG_FILE="$VAULTWARDEN_DIR/config.json"
 ENV_FILE="$VAULTWARDEN_DIR/.env"
 SYSTEMD_SERVICE="/etc/systemd/system/vaultwarden.service"
 
@@ -43,8 +42,9 @@ SYSTEMD_SERVICE="/etc/systemd/system/vaultwarden.service"
 log() {
     local level=$1
     shift
-    local message="$@"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local message="$*"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
 }
 
@@ -297,9 +297,6 @@ get_user_input() {
         read -sp "SMTP Password: " SMTP_PASS
         echo ""
         read -p "SMTP From Address: " SMTP_FROM
-        SMTP_ENABLED="true"
-    else
-        SMTP_ENABLED="false"
     fi
     
     echo ""
@@ -659,7 +656,7 @@ print_summary() {
     
     echo -e "${GREEN}${BOLD}"
     echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║          Installation Completed Successfully!                   ║"
+    echo "║          Installation Completed Successfully!                    ║"
     echo "╚══════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo ""
@@ -702,7 +699,7 @@ print_summary() {
 
 main() {
     # Initialize log file
-    touch "$LOG_FILE"
+    touch "$LOG_FILE" 2>/dev/null || true
     log "INFO" "=== Vaultwarden Installation Started ==="
     
     # System checks
