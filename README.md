@@ -53,6 +53,8 @@ The script creates convenient aliases for Vaultwarden management:
 - `vw-backup` - Create manual backup
 - `vw-config` - Edit configuration
 - `vw-admin-key` - Display admin token
+- `vw-cleanup` - Stop and remove containers/services
+- `vw-diagnose` - Run diagnostics for troubleshooting
 
 ### 💾 Backup System
 - **Automatic Backups**: Daily automated backups at 2 AM
@@ -128,16 +130,19 @@ vw-restart
 
 # Check status
 vw-status
+
+# Cleanup (stop and remove everything)
+vw-cleanup
 ```
 
-### Viewing Logs
+### Troubleshooting
 
 ```bash
-# Real-time logs
-vw-logs
+# Run diagnostics
+vw-diagnose
 
-# View installation log
-cat /var/log/vaultwarden-setup.log
+# View logs in real-time
+vw-logs
 ```
 
 ### Updating Vaultwarden

@@ -142,6 +142,9 @@ install_dependencies() {
                 nginx \
                 ufw \
                 fail2ban \
+                net-tools \
+                lsof \
+                psmisc \
                 >> "$LOG_FILE" 2>&1
             ;;
         centos|rhel|fedora)
@@ -161,6 +164,9 @@ install_dependencies() {
                 nginx \
                 firewalld \
                 fail2ban \
+                net-tools \
+                lsof \
+                psmisc \
                 >> "$LOG_FILE" 2>&1
             ;;
         arch)
@@ -177,6 +183,9 @@ install_dependencies() {
                 nginx \
                 ufw \
                 fail2ban \
+                net-tools \
+                lsof \
+                psmisc \
                 >> "$LOG_FILE" 2>&1
             ;;
         *)
@@ -576,6 +585,8 @@ alias vw-update='docker pull vaultwarden/server:latest && systemctl restart vaul
 alias vw-backup='tar -czf /root/vaultwarden-backup-$(date +%Y%m%d-%H%M%S).tar.gz /var/lib/vaultwarden'
 alias vw-config='nano /opt/vaultwarden/.env'
 alias vw-admin-key='cat /root/vaultwarden-admin-key.txt'
+alias vw-cleanup='docker stop vaultwarden 2>/dev/null; docker rm vaultwarden 2>/dev/null; systemctl stop vaultwarden 2>/dev/null; echo "Cleanup completed"'
+alias vw-diagnose='echo "=== Service Status ==="; systemctl status vaultwarden; echo ""; echo "=== Docker Logs ==="; docker logs vaultwarden 2>&1 | tail -20; echo ""; echo "=== Port 8000 ==="; ss -tuln | grep 8000'
 EOF
 
     print_success "Command aliases created"
@@ -605,22 +616,142 @@ EOF
 }
 
 # =============================================================================
+# Cleanup and Error Recovery
+# =============================================================================
+
+cleanup_existing() {
+    print_step "Checking for existing installation..."
+    
+    # Stop and remove existing Docker container
+    if docker ps -a | grep -q vaultwarden; then
+        print_info "Stopping existing Vaultwarden container..."
+        docker stop vaultwarden 2>/dev/null || true
+        docker rm vaultwarden 2>/dev/null || true
+        print_success "Existing container removed"
+    fi
+    
+    # Stop and disable existing systemd service
+    if systemctl list-units --full -all | grep -q vaultwarden.service; then
+        print_info "Stopping existing Vaultwarden service..."
+        systemctl stop vaultwarden 2>/dev/null || true
+        systemctl disable vaultwarden 2>/dev/null || true
+        print_success "Existing service stopped"
+    fi
+    
+    # Check if port 8000 is in use
+    if netstat -tuln 2>/dev/null | grep -q ":8000 " || ss -tuln 2>/dev/null | grep -q ":8000 "; then
+        print_warning "Port 8000 is in use, attempting to free it..."
+        # Find and kill process using port 8000
+        local pid=$(lsof -ti:8000 2>/dev/null || fuser 8000/tcp 2>/dev/null | awk '{print $1}')
+        if [ -n "$pid" ]; then
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 2
+            print_success "Port 8000 freed"
+        fi
+    fi
+    
+    print_success "Cleanup completed"
+}
+
+diagnose_startup_failure() {
+    print_error "Service failed to start. Diagnosing..."
+    echo ""
+    
+    # Check systemd logs
+    print_info "Systemd logs:"
+    journalctl -u vaultwarden -n 20 --no-pager
+    echo ""
+    
+    # Check Docker logs if container exists
+    if docker ps -a | grep -q vaultwarden; then
+        print_info "Docker container logs:"
+        docker logs vaultwarden 2>&1 | tail -20
+        echo ""
+    fi
+    
+    # Check port availability
+    print_info "Checking port 8000..."
+    if netstat -tuln 2>/dev/null | grep -q ":8000 " || ss -tuln 2>/dev/null | grep -q ":8000 "; then
+        print_warning "Port 8000 is already in use!"
+        netstat -tuln 2>/dev/null | grep ":8000 " || ss -tuln 2>/dev/null | grep ":8000 "
+    else
+        print_success "Port 8000 is available"
+    fi
+    
+    # Check Docker status
+    print_info "Docker service status:"
+    systemctl status docker --no-pager -l | head -10
+    echo ""
+    
+    # Check file permissions
+    print_info "Directory permissions:"
+    ls -la "$VAULTWARDEN_DIR" "$DATA_DIR" 2>/dev/null || true
+    echo ""
+}
+
+# =============================================================================
 # Service Management
 # =============================================================================
 
 start_services() {
     print_step "Starting Vaultwarden service..."
     
+    # Try to start the service
+    systemctl start vaultwarden
+    sleep 5
+    
+    # Check if service is active
+    if systemctl is-active --quiet vaultwarden; then
+        print_success "Vaultwarden service started successfully"
+        return 0
+    fi
+    
+    # First attempt failed, diagnose and retry
+    print_warning "First start attempt failed, diagnosing issue..."
+    diagnose_startup_failure
+    
+    print_step "Attempting automatic recovery..."
+    
+    # Stop everything
+    systemctl stop vaultwarden 2>/dev/null || true
+    docker stop vaultwarden 2>/dev/null || true
+    docker rm vaultwarden 2>/dev/null || true
+    sleep 3
+    
+    # Free port 8000 if needed
+    local pid=$(lsof -ti:8000 2>/dev/null || fuser 8000/tcp 2>/dev/null | awk '{print $1}')
+    if [ -n "$pid" ]; then
+        print_info "Killing process on port 8000 (PID: $pid)..."
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # Reload systemd
+    systemctl daemon-reload
+    
+    # Try starting again
+    print_info "Retrying service start..."
     systemctl start vaultwarden
     sleep 5
     
     if systemctl is-active --quiet vaultwarden; then
-        print_success "Vaultwarden service started successfully"
-    else
-        print_error "Failed to start Vaultwarden service"
-        print_info "Check logs with: journalctl -u vaultwarden -n 50"
-        exit 1
+        print_success "Vaultwarden service started successfully after recovery"
+        return 0
     fi
+    
+    # Still failed, show detailed error
+    print_error "Failed to start Vaultwarden service after recovery attempt"
+    echo ""
+    print_info "Final diagnostic information:"
+    diagnose_startup_failure
+    
+    print_info "Manual commands to try:"
+    echo "  1. Check configuration: cat $ENV_FILE"
+    echo "  2. Test Docker manually: docker run --rm -v $DATA_DIR:/data vaultwarden/server:latest"
+    echo "  3. Check systemd status: systemctl status vaultwarden"
+    echo "  4. View full logs: journalctl -u vaultwarden -n 100"
+    
+    exit 1
 }
 
 # =============================================================================
@@ -707,6 +838,9 @@ main() {
     check_root
     check_os
     check_internet
+    
+    # Cleanup existing installation
+    cleanup_existing
     
     # Get user input
     get_user_input
