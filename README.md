@@ -332,7 +332,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 For issues and questions:
 - Open an issue on GitHub
-- Check [Vaultwarden Wiki](https://github.com/dani-garcia/vaultwarden/wiki)
 - Visit [Vaultwarden Discussions](https://github.com/dani-garcia/vaultwarden/discussions)
 
 ## Disclaimer

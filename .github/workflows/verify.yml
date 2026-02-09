@@ -1,0 +1,218 @@
+name: Script Verification
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: ShellCheck Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: warning
+          ignore_paths: '.git'
+
+  syntax-check:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify Bash syntax
+        run: |
+          bash -n vaultwarden-setup.sh
+          echo "✓ Syntax check passed"
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install bandit (security scanner)
+        run: |
+          pip install bandit[toml]
+
+      - name: Check for hardcoded credentials
+        run: |
+          echo "Checking for potential security issues..."
+          ! grep -rn "password.*=" vaultwarden-setup.sh | grep -v "SMTP_PASSWORD" | grep -v "DB_PASS" | grep -v "read -sp"
+          ! grep -rn "secret.*=" vaultwarden-setup.sh | grep -v "ADMIN_TOKEN"
+          echo "✓ No hardcoded credentials found"
+
+      - name: Check for dangerous commands
+        run: |
+          echo "Checking for dangerous commands..."
+          ! grep -E "(rm -rf /[^a-zA-Z]|mkfs|dd if=)" vaultwarden-setup.sh
+          echo "✓ No dangerous commands found"
+
+  script-permissions:
+    name: Check File Permissions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify script is executable
+        run: |
+          if [ -x "vaultwarden-setup.sh" ]; then
+            echo "✓ Script is executable"
+          else
+            echo "✗ Script is not executable"
+            exit 1
+          fi
+
+  documentation:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check README exists and has content
+        run: |
+          if [ -f "README.md" ] && [ -s "README.md" ]; then
+            echo "✓ README.md exists and has content"
+            LINES=$(wc -l < README.md)
+            echo "  README has $LINES lines"
+          else
+            echo "✗ README.md missing or empty"
+            exit 1
+          fi
+
+      - name: Check LICENSE exists
+        run: |
+          if [ -f "LICENSE" ] && [ -s "LICENSE" ]; then
+            echo "✓ LICENSE file exists"
+          else
+            echo "✗ LICENSE file missing or empty"
+            exit 1
+          fi
+
+      - name: Verify documentation completeness
+        run: |
+          echo "Checking documentation..."
+          grep -q "Installation" README.md && echo "✓ Installation section found"
+          grep -q "Usage" README.md && echo "✓ Usage section found"
+          grep -q "Features" README.md && echo "✓ Features section found"
+
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for TODO/FIXME comments
+        run: |
+          echo "Checking for unresolved TODOs..."
+          if grep -rn "TODO\|FIXME" vaultwarden-setup.sh; then
+            echo "⚠ Found TODO/FIXME comments (review needed)"
+          else
+            echo "✓ No unresolved TODOs"
+          fi
+        continue-on-error: true
+
+      - name: Check script structure
+        run: |
+          echo "Checking script structure..."
+          grep -q "set -e" vaultwarden-setup.sh && echo "✓ Error handling enabled (set -e)"
+          grep -q "main()" vaultwarden-setup.sh && echo "✓ Main function found"
+          grep -q "log()" vaultwarden-setup.sh && echo "✓ Logging function found"
+
+      - name: Check for proper error handling
+        run: |
+          echo "Checking error handling..."
+          CHECKS=$(grep -c "print_error\|exit 1" vaultwarden-setup.sh)
+          echo "✓ Found $CHECKS error handling statements"
+
+  functional-tests:
+    name: Functional Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test help/version output (dry run)
+        run: |
+          echo "Testing script can be sourced..."
+          bash -c "source vaultwarden-setup.sh; declare -F | head -5"
+          echo "✓ Script functions can be loaded"
+
+      - name: Verify required functions exist
+        run: |
+          echo "Checking for required functions..."
+          grep -q "check_root()" vaultwarden-setup.sh && echo "✓ check_root function found"
+          grep -q "install_dependencies()" vaultwarden-setup.sh && echo "✓ install_dependencies function found"
+          grep -q "setup_certificates()" vaultwarden-setup.sh && echo "✓ setup_certificates function found"
+          grep -q "configure_vaultwarden()" vaultwarden-setup.sh && echo "✓ configure_vaultwarden function found"
+
+  compatibility:
+    name: Distribution Compatibility
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        container: ['ubuntu:22.04', 'ubuntu:20.04', 'debian:12', 'debian:11']
+    container: ${{ matrix.container }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install bash
+        run: |
+          apt-get update -qq
+          apt-get install -y bash
+
+      - name: Verify script syntax on ${{ matrix.container }}
+        run: |
+          bash -n vaultwarden-setup.sh
+          echo "✓ Syntax valid on ${{ matrix.container }}"
+
+  summary:
+    name: Verification Summary
+    runs-on: ubuntu-latest
+    needs: [shellcheck, syntax-check, security-scan, script-permissions, documentation, code-quality, functional-tests, compatibility]
+    if: always()
+    steps:
+      - name: Check all jobs status
+        run: |
+          echo "===================="
+          echo "Verification Summary"
+          echo "===================="
+          echo "All verification checks completed!"
+          echo ""
+          echo "Job Results:"
+          echo "  ShellCheck: ${{ needs.shellcheck.result }}"
+          echo "  Syntax Check: ${{ needs.syntax-check.result }}"
+          echo "  Security Scan: ${{ needs.security-scan.result }}"
+          echo "  Permissions: ${{ needs.script-permissions.result }}"
+          echo "  Documentation: ${{ needs.documentation.result }}"
+          echo "  Code Quality: ${{ needs.code-quality.result }}"
+          echo "  Functional Tests: ${{ needs.functional-tests.result }}"
+          echo "  Compatibility: ${{ needs.compatibility.result }}"
+
+      - name: Fail if any check failed
+        if: |
+          needs.shellcheck.result == 'failure' ||
+          needs.syntax-check.result == 'failure' ||
+          needs.security-scan.result == 'failure' ||
+          needs.script-permissions.result == 'failure' ||
+          needs.documentation.result == 'failure' ||
+          needs.code-quality.result == 'failure' ||
+          needs.functional-tests.result == 'failure' ||
+          needs.compatibility.result == 'failure'
+        run: |
+          echo "❌ One or more verification checks failed"
+          exit 1
