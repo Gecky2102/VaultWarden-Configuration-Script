@@ -128,7 +128,7 @@ jobs:
       - name: Check script structure
         run: |
           echo "Checking script structure..."
-          grep -q "set -e" vaultwarden-setup.sh && echo "✓ Error handling enabled (set -e)"
+          grep -Eq "^set -[A-Za-z]*e" vaultwarden-setup.sh && echo "✓ Error handling enabled"
           grep -q "main()" vaultwarden-setup.sh && echo "✓ Main function found"
           grep -q "log()" vaultwarden-setup.sh && echo "✓ Logging function found"
 
@@ -148,10 +148,9 @@ jobs:
       - name: Test script functions without execution
         run: |
           echo "Testing script structure..."
-          # Extract and test function definitions without executing main
-          sed -n '/^[a-z_]*() {/,/^}/p' vaultwarden-setup.sh > /tmp/functions.sh
-          bash -n /tmp/functions.sh
-          echo "✓ All functions have valid syntax"
+          # Full syntax check is enough; `bash -n` does not execute main.
+          bash -n vaultwarden-setup.sh
+          echo "✓ Script syntax is valid without execution"
 
       - name: Verify required functions exist
         run: |
