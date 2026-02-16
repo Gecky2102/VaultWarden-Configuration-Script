@@ -419,6 +419,19 @@ get_user_input() {
         local default_key_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
         local default_csr_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
         local default_fullchain_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
+
+        if [ -f "$default_key_path" ]; then
+            print_success "Found existing wildcard private key: $default_key_path"
+        else
+            print_warning "Wildcard private key not found at default path: $default_key_path"
+        fi
+
+        if [ -f "$default_csr_path" ]; then
+            print_success "Found existing wildcard CSR: $default_csr_path"
+        else
+            print_warning "Wildcard CSR not found at default path: $default_csr_path"
+        fi
+
         read -e -p "Path to existing wildcard private key [$default_key_path]: " WILDCARD_KEY_PATH
         WILDCARD_KEY_PATH=${WILDCARD_KEY_PATH:-$default_key_path}
         WILDCARD_KEY_PATH=$(ensure_file_exists "$WILDCARD_KEY_PATH" "wildcard private key")
