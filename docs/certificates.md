@@ -18,8 +18,8 @@ Flow:
 2. script generates CSR in `/etc/ssl/vaultwarden/<base-domain>.csr`
    - CSR includes mandatory `Organization (O)` field
 3. you upload CSR to your certificate platform
-4. you provide signed certificate path (and optional CA chain path)
-5. script builds fullchain and uses it in nginx
+4. you place the signed fullchain PEM in the configured input path
+5. you confirm and the script validates/imports it for nginx
 
 Notes:
 - private key remains on server
@@ -40,7 +40,7 @@ Flow:
 1. select mode 4
 2. provide wildcard base domain
 3. confirm or edit existing key/CSR paths
-4. provide signed certificate (and optional CA chain)
+4. place signed fullchain in configured input path and confirm
 5. installer continues with nginx/service/firewall and remaining steps
 
 ## Permissions

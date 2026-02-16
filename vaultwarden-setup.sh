@@ -73,7 +73,6 @@ ACCESS_URL=""
 WILDCARD_BASE_DOMAIN=""
 WILDCARD_ORGANIZATION=""
 WILDCARD_CERT_PATH=""
-WILDCARD_CHAIN_PATH=""
 WILDCARD_KEY_PATH=""
 WILDCARD_CSR_PATH=""
 WILDCARD_FULLCHAIN_PATH=""
@@ -148,6 +147,20 @@ ensure_file_exists() {
     while [ ! -f "$file_path" ]; do
         print_error "$description not found: $file_path"
         read -e -p "Insert a valid path for $description: " file_path
+    done
+    echo "$file_path"
+}
+
+wait_for_existing_file() {
+    local file_path=$1
+    local description=$2
+    local user_input=""
+    while [ ! -f "$file_path" ]; do
+        print_warning "$description not found: $file_path"
+        read -e -p "Press ENTER to re-check or type a different path: " user_input
+        if [ -n "$user_input" ]; then
+            file_path=$user_input
+        fi
     done
     echo "$file_path"
 }
@@ -263,6 +276,52 @@ validate_output_path_writable() {
     if [ ! -w "$out_dir" ]; then
         print_error "Output directory is not writable: $out_dir"
         exit 1
+    fi
+}
+
+validate_nginx_config_matches_inputs() {
+    local redirect_port_suffix=""
+    local expected_redirect=""
+
+    if [ "$EXTERNAL_HTTPS_PORT" != "443" ]; then
+        redirect_port_suffix=":$EXTERNAL_HTTPS_PORT"
+    fi
+    expected_redirect="return 301 https://\\\$server_name${redirect_port_suffix}\\\$request_uri;"
+
+    if ! grep -qF "server_name $DOMAIN;" "$NGINX_SITE"; then
+        print_error "Nginx config mismatch: server_name is not '$DOMAIN'"
+        exit 1
+    fi
+
+    if ! grep -qF "ssl_certificate $SSL_CERT;" "$NGINX_SITE"; then
+        print_error "Nginx config mismatch: ssl_certificate path is not '$SSL_CERT'"
+        exit 1
+    fi
+
+    if ! grep -qF "ssl_certificate_key $SSL_KEY;" "$NGINX_SITE"; then
+        print_error "Nginx config mismatch: ssl_certificate_key path is not '$SSL_KEY'"
+        exit 1
+    fi
+
+    if ! grep -qF "proxy_pass http://127.0.0.1:8000;" "$NGINX_SITE"; then
+        print_error "Nginx config mismatch: proxy_pass must target 127.0.0.1:8000"
+        exit 1
+    fi
+
+    if [ "$INTERNAL_HTTPS_PORT" = "80" ]; then
+        if ! grep -qF "listen 80 ssl http2;" "$NGINX_SITE"; then
+            print_error "Nginx config mismatch: expected TLS listener on internal port 80"
+            exit 1
+        fi
+    else
+        if ! grep -qF "listen $INTERNAL_HTTPS_PORT ssl http2;" "$NGINX_SITE"; then
+            print_error "Nginx config mismatch: expected TLS listener on internal port $INTERNAL_HTTPS_PORT"
+            exit 1
+        fi
+        if ! grep -qF "$expected_redirect" "$NGINX_SITE"; then
+            print_error "Nginx config mismatch: expected HTTP redirect '$expected_redirect'"
+            exit 1
+        fi
     fi
 }
 
@@ -470,7 +529,14 @@ get_user_input() {
 
         local default_key_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
         local default_csr_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
+        local default_signed_cert_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.signed.fullchain.pem"
         local default_fullchain_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
+
+        read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
+        while [ -z "$WILDCARD_ORGANIZATION" ]; do
+            print_error "Organization (O) cannot be empty"
+            read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
+        done
 
         read -e -p "Path for wildcard private key [$default_key_path]: " WILDCARD_KEY_PATH
         WILDCARD_KEY_PATH=${WILDCARD_KEY_PATH:-$default_key_path}
@@ -478,15 +544,12 @@ get_user_input() {
         read -e -p "Path for wildcard CSR [$default_csr_path]: " WILDCARD_CSR_PATH
         WILDCARD_CSR_PATH=${WILDCARD_CSR_PATH:-$default_csr_path}
 
-        read -e -p "Path for wildcard fullchain output [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
+        read -e -p "Path where you will place signed wildcard fullchain [$default_signed_cert_path]: " WILDCARD_CERT_PATH
+        WILDCARD_CERT_PATH=${WILDCARD_CERT_PATH:-$default_signed_cert_path}
+
+        read -e -p "Path for final wildcard fullchain used by nginx [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
         WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-$default_fullchain_path}
         validate_output_path_writable "$WILDCARD_FULLCHAIN_PATH"
-
-        read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
-        while [ -z "$WILDCARD_ORGANIZATION" ]; do
-            print_error "Organization (O) cannot be empty"
-            read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
-        done
     elif [ "$CERT_TYPE" = "3" ]; then
         read -e -p "Path to existing fullchain certificate: " EXISTING_CERT_PATH
         EXISTING_CERT_PATH=$(ensure_file_exists "$EXISTING_CERT_PATH" "certificate file")
@@ -505,6 +568,7 @@ get_user_input() {
 
         local default_key_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
         local default_csr_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
+        local default_signed_cert_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.signed.fullchain.pem"
         local default_fullchain_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
 
         if [ -f "$default_key_path" ]; then
@@ -530,7 +594,10 @@ get_user_input() {
         validate_csr_file "$WILDCARD_CSR_PATH"
         validate_csr_contains_organization "$WILDCARD_CSR_PATH"
 
-        read -e -p "Path for wildcard fullchain output [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
+        read -e -p "Path where signed wildcard fullchain is/will be available [$default_signed_cert_path]: " WILDCARD_CERT_PATH
+        WILDCARD_CERT_PATH=${WILDCARD_CERT_PATH:-$default_signed_cert_path}
+
+        read -e -p "Path for final wildcard fullchain used by nginx [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
         WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-$default_fullchain_path}
         validate_output_path_writable "$WILDCARD_FULLCHAIN_PATH"
     fi
@@ -749,7 +816,8 @@ EOF
             echo ""
             print_info "Private key generated: $WILDCARD_KEY_PATH"
             print_info "CSR generated: $WILDCARD_CSR_PATH"
-            print_info "Upload this CSR to your certificate provider, then provide the signed certificate path."
+            print_info "Upload this CSR to your certificate provider."
+            print_info "Then place the signed fullchain at the configured path and confirm."
             echo ""
         else
             validate_private_key_file "$WILDCARD_KEY_PATH"
@@ -760,20 +828,27 @@ EOF
             print_info "CSR: $WILDCARD_CSR_PATH"
         fi
 
-        read -e -p "Path to signed certificate/fullchain PEM: " WILDCARD_CERT_PATH
-        WILDCARD_CERT_PATH=$(ensure_file_exists "$WILDCARD_CERT_PATH" "signed certificate")
+        if [ -z "$WILDCARD_CERT_PATH" ]; then
+            WILDCARD_CERT_PATH="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.signed.fullchain.pem"
+        fi
+        print_info "Place the signed wildcard fullchain at: $WILDCARD_CERT_PATH"
+        WILDCARD_CERT_PATH=$(wait_for_existing_file "$WILDCARD_CERT_PATH" "signed certificate/fullchain")
         validate_certificate_file "$WILDCARD_CERT_PATH"
         validate_key_matches_certificate "$WILDCARD_KEY_PATH" "$WILDCARD_CERT_PATH"
         validate_certificate_covers_domain "$WILDCARD_CERT_PATH" "$DOMAIN"
         validate_certificate_covers_domain "$WILDCARD_CERT_PATH" "*.$WILDCARD_BASE_DOMAIN"
 
-        read -e -p "Path to CA chain PEM (optional, Enter to skip): " WILDCARD_CHAIN_PATH
-        if [ -n "$WILDCARD_CHAIN_PATH" ]; then
-            WILDCARD_CHAIN_PATH=$(ensure_file_exists "$WILDCARD_CHAIN_PATH" "CA chain")
-            validate_certificate_file "$WILDCARD_CHAIN_PATH"
-            cat "$WILDCARD_CERT_PATH" "$WILDCARD_CHAIN_PATH" > "$WILDCARD_FULLCHAIN_PATH"
+        if [ -z "$WILDCARD_FULLCHAIN_PATH" ]; then
+            WILDCARD_FULLCHAIN_PATH="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
         else
+            print_info "Using wildcard fullchain output path: $WILDCARD_FULLCHAIN_PATH"
+        fi
+        validate_output_path_writable "$WILDCARD_FULLCHAIN_PATH"
+
+        if [ "$WILDCARD_CERT_PATH" != "$WILDCARD_FULLCHAIN_PATH" ]; then
             cp "$WILDCARD_CERT_PATH" "$WILDCARD_FULLCHAIN_PATH"
+        else
+            print_info "Signed fullchain already in final output path."
         fi
         chmod 600 "$WILDCARD_FULLCHAIN_PATH"
 
@@ -1014,11 +1089,12 @@ EOF
     # Enable site
     ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/
     rm -f /etc/nginx/sites-enabled/default
-    
-    # Test nginx configuration
-    nginx -t >> "$LOG_FILE" 2>&1
-    
-    if [ $? -eq 0 ]; then
+
+    # Validate generated config against user inputs
+    validate_nginx_config_matches_inputs
+
+    # Test nginx configuration and restart service
+    if nginx -t >> "$LOG_FILE" 2>&1; then
         systemctl restart nginx
         print_success "Nginx configured and restarted"
     else
