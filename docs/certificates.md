@@ -16,6 +16,7 @@ Use this when certificates are issued from your own PKI, panel, or provider.
 Flow:
 1. script generates private key in `/etc/ssl/vaultwarden/<base-domain>.key`
 2. script generates CSR in `/etc/ssl/vaultwarden/<base-domain>.csr`
+   - CSR includes mandatory `Organization (O)` field
 3. you upload CSR to your certificate platform
 4. you provide signed certificate path (and optional CA chain path)
 5. script builds fullchain and uses it in nginx
@@ -53,3 +54,7 @@ Before continuing, the script validates:
 - CSR format (when wildcard flow is used)
 - certificate format
 - key/certificate match
+- domain format and email format
+- certificate domain coverage (CN/SAN) for the configured domain
+- wildcard certificate coverage for `*.<base-domain>` in wildcard modes
+- output fullchain path writability

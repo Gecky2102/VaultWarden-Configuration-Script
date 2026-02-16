@@ -71,6 +71,7 @@ EXTERNAL_HTTPS_PORT="443"
 INTERNAL_HTTPS_PORT="443"
 ACCESS_URL=""
 WILDCARD_BASE_DOMAIN=""
+WILDCARD_ORGANIZATION=""
 WILDCARD_CERT_PATH=""
 WILDCARD_CHAIN_PATH=""
 WILDCARD_KEY_PATH=""
@@ -167,6 +168,16 @@ validate_csr_file() {
     fi
 }
 
+validate_csr_contains_organization() {
+    local csr_path=$1
+    local subject
+    subject=$(openssl req -in "$csr_path" -noout -subject -nameopt RFC2253 2>/dev/null || true)
+    if ! printf "%s" "$subject" | grep -Eq '(^|,)O='; then
+        print_error "CSR missing Organization (O) field: $csr_path"
+        exit 1
+    fi
+}
+
 validate_certificate_file() {
     local cert_path=$1
     if ! openssl x509 -in "$cert_path" -noout >/dev/null 2>&1; then
@@ -183,6 +194,74 @@ validate_key_matches_certificate() {
     cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $2}')
     if [ -z "$key_pub" ] || [ -z "$cert_pub" ] || [ "$key_pub" != "$cert_pub" ]; then
         print_error "Private key does not match certificate: key=$key_path cert=$cert_path"
+        exit 1
+    fi
+}
+
+is_valid_domain_name() {
+    local domain=$1
+    [[ "$domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[A-Za-z]{2,}$ ]]
+}
+
+is_valid_email_address() {
+    local email=$1
+    [[ "$email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
+}
+
+domain_matches_pattern() {
+    local domain=$1
+    local pattern=$2
+    if [[ "$pattern" == \*.* ]]; then
+        local suffix=${pattern#*.}
+        [[ "$domain" == *".${suffix}" ]] && [[ "$domain" != "$suffix" ]]
+    else
+        [[ "$domain" == "$pattern" ]]
+    fi
+}
+
+certificate_covers_domain() {
+    local cert_path=$1
+    local expected_domain=$2
+    local cert_names=""
+    local cn=""
+
+    cert_names=$(openssl x509 -in "$cert_path" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/.*DNS:[[:space:]]*//p' || true)
+    cn=$(openssl x509 -in "$cert_path" -noout -subject -nameopt RFC2253 2>/dev/null | sed -n 's/^subject=//p' | tr ',' '\n' | sed -n 's/^CN=//p' | head -n 1 || true)
+
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        if domain_matches_pattern "$expected_domain" "$name"; then
+            return 0
+        fi
+    done <<< "$cert_names"
+
+    if [ -n "$cn" ] && domain_matches_pattern "$expected_domain" "$cn"; then
+        return 0
+    fi
+
+    return 1
+}
+
+validate_certificate_covers_domain() {
+    local cert_path=$1
+    local expected_domain=$2
+    if ! certificate_covers_domain "$cert_path" "$expected_domain"; then
+        print_error "Certificate does not cover domain '$expected_domain': $cert_path"
+        exit 1
+    fi
+}
+
+validate_output_path_writable() {
+    local out_path=$1
+    local out_dir
+    out_dir=$(dirname "$out_path")
+    mkdir -p "$out_dir"
+    if [ -d "$out_path" ]; then
+        print_error "Output path is a directory, expected file path: $out_path"
+        exit 1
+    fi
+    if [ ! -w "$out_dir" ]; then
+        print_error "Output directory is not writable: $out_dir"
         exit 1
     fi
 }
@@ -351,8 +430,8 @@ get_user_input() {
     
     # Domain
     read -p "Enter your domain (e.g., vault.example.com): " DOMAIN
-    while [ -z "$DOMAIN" ]; do
-        print_error "Domain cannot be empty"
+    while [ -z "$DOMAIN" ] || ! is_valid_domain_name "$DOMAIN"; do
+        print_error "Invalid domain format"
         read -p "Enter your domain: " DOMAIN
     done
     
@@ -371,8 +450,8 @@ get_user_input() {
 
     if [ "$CERT_TYPE" = "1" ]; then
         read -p "Enter your email for Let's Encrypt: " EMAIL
-        while [ -z "$EMAIL" ]; do
-            print_error "Email cannot be empty"
+        while [ -z "$EMAIL" ] || ! is_valid_email_address "$EMAIL"; do
+            print_error "Invalid email format"
             read -p "Enter your email: " EMAIL
         done
     elif [ "$CERT_TYPE" = "2" ]; then
@@ -401,10 +480,18 @@ get_user_input() {
 
         read -e -p "Path for wildcard fullchain output [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
         WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-$default_fullchain_path}
+        validate_output_path_writable "$WILDCARD_FULLCHAIN_PATH"
+
+        read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
+        while [ -z "$WILDCARD_ORGANIZATION" ]; do
+            print_error "Organization (O) cannot be empty"
+            read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
+        done
     elif [ "$CERT_TYPE" = "3" ]; then
         read -e -p "Path to existing fullchain certificate: " EXISTING_CERT_PATH
         EXISTING_CERT_PATH=$(ensure_file_exists "$EXISTING_CERT_PATH" "certificate file")
         validate_certificate_file "$EXISTING_CERT_PATH"
+        validate_certificate_covers_domain "$EXISTING_CERT_PATH" "$DOMAIN"
         read -e -p "Path to existing private key: " EXISTING_KEY_PATH
         EXISTING_KEY_PATH=$(ensure_file_exists "$EXISTING_KEY_PATH" "private key")
         validate_private_key_file "$EXISTING_KEY_PATH"
@@ -441,9 +528,11 @@ get_user_input() {
         WILDCARD_CSR_PATH=${WILDCARD_CSR_PATH:-$default_csr_path}
         WILDCARD_CSR_PATH=$(ensure_file_exists "$WILDCARD_CSR_PATH" "wildcard CSR")
         validate_csr_file "$WILDCARD_CSR_PATH"
+        validate_csr_contains_organization "$WILDCARD_CSR_PATH"
 
         read -e -p "Path for wildcard fullchain output [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
         WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-$default_fullchain_path}
+        validate_output_path_writable "$WILDCARD_FULLCHAIN_PATH"
     fi
 
     echo ""
@@ -572,6 +661,10 @@ setup_certificates() {
             print_info "Existing Let's Encrypt certificate found for $DOMAIN, reusing it."
             SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
             SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+            validate_certificate_file "$SSL_CERT"
+            validate_private_key_file "$SSL_KEY"
+            validate_key_matches_certificate "$SSL_KEY" "$SSL_CERT"
+            validate_certificate_covers_domain "$SSL_CERT" "$DOMAIN"
             print_success "SSL certificates ready"
             return
         fi
@@ -585,6 +678,10 @@ setup_certificates() {
 
         SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
         SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+        validate_certificate_file "$SSL_CERT"
+        validate_private_key_file "$SSL_KEY"
+        validate_key_matches_certificate "$SSL_KEY" "$SSL_CERT"
+        validate_certificate_covers_domain "$SSL_CERT" "$DOMAIN"
         print_success "SSL certificates obtained successfully"
         return
     fi
@@ -611,10 +708,11 @@ setup_certificates() {
             fi
 
             print_info "Generating CSR for *.$WILDCARD_BASE_DOMAIN and $WILDCARD_BASE_DOMAIN..."
+            local csr_organization="${WILDCARD_ORGANIZATION//\//-}"
             if ! openssl req -new \
                 -key "$WILDCARD_KEY_PATH" \
                 -out "$WILDCARD_CSR_PATH" \
-                -subj "/CN=*.$WILDCARD_BASE_DOMAIN" \
+                -subj "/O=$csr_organization/CN=*.$WILDCARD_BASE_DOMAIN" \
                 -addext "subjectAltName=DNS:$WILDCARD_BASE_DOMAIN,DNS:*.$WILDCARD_BASE_DOMAIN" \
                 >> "$LOG_FILE" 2>&1; then
                 local openssl_cfg
@@ -626,6 +724,7 @@ req_extensions = req_ext
 prompt = no
 
 [req_dn]
+O = $csr_organization
 CN = *.$WILDCARD_BASE_DOMAIN
 
 [req_ext]
@@ -645,6 +744,7 @@ EOF
 
             validate_private_key_file "$WILDCARD_KEY_PATH"
             validate_csr_file "$WILDCARD_CSR_PATH"
+            validate_csr_contains_organization "$WILDCARD_CSR_PATH"
 
             echo ""
             print_info "Private key generated: $WILDCARD_KEY_PATH"
@@ -654,6 +754,7 @@ EOF
         else
             validate_private_key_file "$WILDCARD_KEY_PATH"
             validate_csr_file "$WILDCARD_CSR_PATH"
+            validate_csr_contains_organization "$WILDCARD_CSR_PATH"
             print_info "Resuming wildcard flow with existing key/CSR:"
             print_info "Private key: $WILDCARD_KEY_PATH"
             print_info "CSR: $WILDCARD_CSR_PATH"
@@ -663,6 +764,8 @@ EOF
         WILDCARD_CERT_PATH=$(ensure_file_exists "$WILDCARD_CERT_PATH" "signed certificate")
         validate_certificate_file "$WILDCARD_CERT_PATH"
         validate_key_matches_certificate "$WILDCARD_KEY_PATH" "$WILDCARD_CERT_PATH"
+        validate_certificate_covers_domain "$WILDCARD_CERT_PATH" "$DOMAIN"
+        validate_certificate_covers_domain "$WILDCARD_CERT_PATH" "*.$WILDCARD_BASE_DOMAIN"
 
         read -e -p "Path to CA chain PEM (optional, Enter to skip): " WILDCARD_CHAIN_PATH
         if [ -n "$WILDCARD_CHAIN_PATH" ]; then
@@ -686,6 +789,7 @@ EOF
     validate_certificate_file "$EXISTING_CERT_PATH"
     validate_private_key_file "$EXISTING_KEY_PATH"
     validate_key_matches_certificate "$EXISTING_KEY_PATH" "$EXISTING_CERT_PATH"
+    validate_certificate_covers_domain "$EXISTING_CERT_PATH" "$DOMAIN"
     cp "$EXISTING_CERT_PATH" "$SSL_CERT"
     cp "$EXISTING_KEY_PATH" "$SSL_KEY"
     chmod 600 "$SSL_CERT" "$SSL_KEY"
