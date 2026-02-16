@@ -318,14 +318,17 @@ extract_port_from_url() {
 }
 
 select_setup_mode() {
+    local setup_mode_input=""
     echo ""
     echo "Setup Mode:"
     echo "  1) Full setup (install/configure everything)"
     echo "  2) Commands only (update aliases + vw-help only)"
     read -p "Select setup mode [1-2]: " setup_mode_input
+    setup_mode_input=$(echo "$setup_mode_input" | tr -d '\r' | xargs)
     while [[ ! "$setup_mode_input" =~ ^[1-2]$ ]]; do
         print_error "Invalid selection"
         read -p "Select setup mode [1-2]: " setup_mode_input
+        setup_mode_input=$(echo "$setup_mode_input" | tr -d '\r' | xargs)
     done
 
     if [ "$setup_mode_input" = "2" ]; then
