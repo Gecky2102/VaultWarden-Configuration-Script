@@ -2,7 +2,7 @@
 
 Automated interactive installer for Vaultwarden on Linux (Docker + systemd + nginx).
 
-## Quick Start
+## Installation
 
 ```bash
 wget https://raw.githubusercontent.com/gecky2102/VaultWarden-Configuration-Script/main/vaultwarden-setup.sh
@@ -10,7 +10,7 @@ chmod +x vaultwarden-setup.sh
 sudo ./vaultwarden-setup.sh
 ```
 
-## What It Does
+## Features
 
 - installs dependencies and Docker
 - configures Vaultwarden with SQLite/PostgreSQL/MySQL
@@ -22,6 +22,10 @@ sudo ./vaultwarden-setup.sh
 - supports external/internal HTTPS port mapping (for NAT/port-forwarding setups)
 - configures backups and management aliases
 - optionally installs a custom MOTD dashboard
+
+## Usage
+
+Run the installer, follow the interactive prompts, then use the generated service, nginx configuration, and aliases for day-to-day operations.
 
 ## Requirements
 
