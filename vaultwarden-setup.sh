@@ -1218,6 +1218,8 @@ setup_custom_motd() {
 
 CONTAINER="vaultwarden"
 EXTERNAL_URL="$ACCESS_URL"
+MOTD_DOMAIN="$DOMAIN"
+MOTD_INTERNAL_HTTPS_PORT="$INTERNAL_HTTPS_PORT"
 
 # Controllo stato container
 if docker ps --format '{{.Names}}' | grep -q "^\${CONTAINER}\$"; then
@@ -1252,7 +1254,17 @@ if [[ "\$HTTP_CODE" =~ ^(2|3) ]]; then
 elif [ -n "\$HTTP_CODE" ] && [ "\$HTTP_CODE" != "000" ]; then
     EXT_STATUS="🟠 Risponde ma errore (\$HTTP_CODE)"
 else
-    EXT_STATUS="🔴 KO (timeout/DNS/TLS)"
+    LOCAL_URL="https://\${MOTD_DOMAIN}:\${MOTD_INTERNAL_HTTPS_PORT}"
+    LOCAL_CODE=\$(curl -k -sS -o /dev/null -m 3 \
+        --resolve "\${MOTD_DOMAIN}:\${MOTD_INTERNAL_HTTPS_PORT}:127.0.0.1" \
+        -w "%{http_code}" "\$LOCAL_URL" 2>/dev/null || true)
+    if [[ "\$LOCAL_CODE" =~ ^(2|3) ]]; then
+        EXT_STATUS="🟡 KO esterno da host (NAT loopback/DNS), locale OK (\$LOCAL_CODE)"
+    elif [ -n "\$LOCAL_CODE" ] && [ "\$LOCAL_CODE" != "000" ]; then
+        EXT_STATUS="🟠 KO esterno, locale risponde con errore (\$LOCAL_CODE)"
+    else
+        EXT_STATUS="🔴 KO (timeout/DNS/TLS)"
+    fi
 fi
 
 # Docker stats
@@ -1325,12 +1337,29 @@ echo "    Check Esterno (\$EXTERNAL_URL): \$EXT_STATUS"
 echo ""
 
 echo "    CPU Load: \$(uptime | awk -F'load average:' '{ print \$2 }')"
-if command -v free >/dev/null 2>&1; then
-    echo "    RAM Usage: \$(free -h | awk '/Mem:/ {print \$3 \"/\" \$2}')"
-else
-    echo "    RAM Usage: N/A"
+RAM_USAGE="N/A"
+if [ -r /proc/meminfo ]; then
+    RAM_USAGE=\$(awk '
+        /^MemTotal:/ {t=\$2}
+        /^MemAvailable:/ {a=\$2}
+        END {
+            if (t>0 && a>=0) {
+                u=t-a
+                printf "%.1fGi/%.1fGi", u/1048576, t/1048576
+            }
+        }' /proc/meminfo 2>/dev/null)
 fi
-echo "    Disk Usage: \$(df -h / | awk 'NR==2 {print \$3 \"/\" \$2 \" (\" \$5 \")\"}')"
+if [ "\$RAM_USAGE" = "N/A" ] && command -v free >/dev/null 2>&1; then
+    RAM_USAGE=\$(free -h 2>/dev/null | awk 'NR==2 && NF>=3 {print \$3 \"/\" \$2}')
+fi
+[ -z "\$RAM_USAGE" ] && RAM_USAGE="N/A"
+echo "    RAM Usage: \$RAM_USAGE"
+DISK_USAGE=\$(df -hP / 2>/dev/null | awk 'END {if (NR>=2) print \$3 \"/\" \$2 \" (\" \$5 \")\"}')
+if [ -z "\$DISK_USAGE" ]; then
+    DISK_USAGE=\$(df -h / 2>/dev/null | awk 'END {if (NR>=2) print \$3 \"/\" \$2 \" (\" \$5 \")\"}')
+fi
+[ -z "\$DISK_USAGE" ] && DISK_USAGE="N/A"
+echo "    Disk Usage: \$DISK_USAGE"
 echo ""
 
 echo "    Docker: \${DOCKER_VER:-N/A}"
