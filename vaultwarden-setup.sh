@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -Eeuo pipefail
 
 # =============================================================================
 # Vaultwarden EE Configuration Script
@@ -34,6 +34,49 @@ VAULTWARDEN_DIR="/opt/vaultwarden"
 DATA_DIR="/var/lib/vaultwarden"
 ENV_FILE="$VAULTWARDEN_DIR/.env"
 SYSTEMD_SERVICE="/etc/systemd/system/vaultwarden.service"
+NGINX_SITE="/etc/nginx/sites-available/vaultwarden"
+ALIAS_FILE="/root/.bashrc"
+ALIAS_MARKER_START="# >>> VAULTWARDEN ALIASES START >>>"
+ALIAS_MARKER_END="# <<< VAULTWARDEN ALIASES END <<<"
+BACKUP_SCRIPT="/usr/local/bin/vaultwarden-backup.sh"
+BACKUP_CRON_LINE="0 2 * * * /usr/local/bin/vaultwarden-backup.sh"
+MANUAL_CERT_DIR="/etc/ssl/vaultwarden"
+
+# Runtime variables (initialized for nounset safety)
+OS=""
+VERSION=""
+DOMAIN=""
+EMAIL=""
+CERT_TYPE=""
+VW_VERSION="latest"
+DB_TYPE="1"
+DB_HOST=""
+DB_PORT=""
+DB_NAME=""
+DB_USER=""
+DB_PASS=""
+GEN_TOKEN=""
+ADMIN_TOKEN=""
+SETUP_SMTP=""
+SMTP_HOST=""
+SMTP_PORT=""
+SMTP_USER=""
+SMTP_PASS=""
+SMTP_FROM=""
+SMTP_ENABLED="false"
+SSL_CERT=""
+SSL_KEY=""
+CERT_DOMAIN=""
+DATABASE_URL=""
+EXTERNAL_HTTPS_PORT="443"
+INTERNAL_HTTPS_PORT="443"
+ACCESS_URL=""
+WILDCARD_BASE_DOMAIN=""
+WILDCARD_CERT_PATH=""
+WILDCARD_CHAIN_PATH=""
+WILDCARD_KEY_PATH=""
+EXISTING_CERT_PATH=""
+EXISTING_KEY_PATH=""
 
 # =============================================================================
 # Logging Functions
@@ -81,6 +124,30 @@ print_info() {
     echo -e "${BLUE}ℹ $1${NC}"
 }
 
+handle_error() {
+    local exit_code=$?
+    local line_no=${1:-unknown}
+    print_error "Unexpected error at line ${line_no}. Check $LOG_FILE for details."
+    exit "$exit_code"
+}
+
+trap 'handle_error $LINENO' ERR
+
+is_valid_port() {
+    local port=$1
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+ensure_file_exists() {
+    local file_path=$1
+    local description=$2
+    while [ ! -f "$file_path" ]; do
+        print_error "$description not found: $file_path"
+        read -e -p "Insert a valid path for $description: " file_path
+    done
+    echo "$file_path"
+}
+
 # =============================================================================
 # System Checks
 # =============================================================================
@@ -93,6 +160,11 @@ check_root() {
 }
 
 check_os() {
+    if [ "$(uname -s)" != "Linux" ]; then
+        print_error "Unsupported OS. This script currently supports Linux hosts with systemd."
+        exit 1
+    fi
+
     if [ ! -f /etc/os-release ]; then
         print_error "Cannot determine OS type"
         exit 1
@@ -103,6 +175,11 @@ check_os() {
     VERSION=$VERSION_ID
     
     print_success "Detected OS: $OS $VERSION"
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        print_error "systemctl not found. A systemd-based distribution is required."
+        exit 1
+    fi
 }
 
 check_internet() {
@@ -240,22 +317,59 @@ get_user_input() {
         read -p "Enter your domain: " DOMAIN
     done
     
-    # Email for certificates
-    read -p "Enter your email for Let's Encrypt: " EMAIL
-    while [ -z "$EMAIL" ]; do
-        print_error "Email cannot be empty"
-        read -p "Enter your email: " EMAIL
-    done
-    
     # Certificate type
     echo ""
     echo "Certificate Type:"
-    echo "  1) Classic certificate (single domain)"
-    echo "  2) Wildcard certificate (*.example.com)"
-    read -p "Select certificate type [1-2]: " CERT_TYPE
-    while [[ ! "$CERT_TYPE" =~ ^[1-2]$ ]]; do
+    echo "  1) Let's Encrypt (single domain, automatic)"
+    echo "  2) Wildcard manual flow (generate private key + CSR, then import signed cert)"
+    echo "  3) Use existing certificate and key paths"
+    read -p "Select certificate type [1-3]: " CERT_TYPE
+    while [[ ! "$CERT_TYPE" =~ ^[1-3]$ ]]; do
         print_error "Invalid selection"
-        read -p "Select certificate type [1-2]: " CERT_TYPE
+        read -p "Select certificate type [1-3]: " CERT_TYPE
+    done
+
+    if [ "$CERT_TYPE" = "1" ]; then
+        read -p "Enter your email for Let's Encrypt: " EMAIL
+        while [ -z "$EMAIL" ]; do
+            print_error "Email cannot be empty"
+            read -p "Enter your email: " EMAIL
+        done
+    elif [ "$CERT_TYPE" = "2" ]; then
+        WILDCARD_BASE_DOMAIN=$(echo "$DOMAIN" | sed 's/^[^.]*\.//')
+        if [ -z "$WILDCARD_BASE_DOMAIN" ] || [ "$WILDCARD_BASE_DOMAIN" = "$DOMAIN" ]; then
+            read -p "Enter wildcard base domain (e.g., example.com): " WILDCARD_BASE_DOMAIN
+        else
+            read -p "Wildcard base domain [$WILDCARD_BASE_DOMAIN]: " input_base_domain
+            WILDCARD_BASE_DOMAIN=${input_base_domain:-$WILDCARD_BASE_DOMAIN}
+        fi
+
+        while [ -z "$WILDCARD_BASE_DOMAIN" ] || [[ ! "$WILDCARD_BASE_DOMAIN" =~ \. ]]; do
+            print_error "Invalid wildcard base domain"
+            read -p "Enter wildcard base domain (e.g., example.com): " WILDCARD_BASE_DOMAIN
+        done
+    else
+        read -e -p "Path to existing fullchain certificate: " EXISTING_CERT_PATH
+        EXISTING_CERT_PATH=$(ensure_file_exists "$EXISTING_CERT_PATH" "certificate file")
+        read -e -p "Path to existing private key: " EXISTING_KEY_PATH
+        EXISTING_KEY_PATH=$(ensure_file_exists "$EXISTING_KEY_PATH" "private key")
+    fi
+
+    echo ""
+    read -p "External HTTPS port exposed to users [443]: " EXTERNAL_HTTPS_PORT
+    EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-443}
+    while ! is_valid_port "$EXTERNAL_HTTPS_PORT"; do
+        print_error "Invalid external HTTPS port"
+        read -p "External HTTPS port [443]: " EXTERNAL_HTTPS_PORT
+        EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-443}
+    done
+
+    read -p "Internal HTTPS port on this server [443]: " INTERNAL_HTTPS_PORT
+    INTERNAL_HTTPS_PORT=${INTERNAL_HTTPS_PORT:-443}
+    while ! is_valid_port "$INTERNAL_HTTPS_PORT"; do
+        print_error "Invalid internal HTTPS port"
+        read -p "Internal HTTPS port [443]: " INTERNAL_HTTPS_PORT
+        INTERNAL_HTTPS_PORT=${INTERNAL_HTTPS_PORT:-443}
     done
     
     # Vaultwarden version
@@ -284,6 +398,18 @@ get_user_input() {
         read -p "Enter database user: " DB_USER
         read -sp "Enter database password: " DB_PASS
         echo ""
+
+        while [ -z "$DB_HOST" ] || [ -z "$DB_NAME" ] || [ -z "$DB_USER" ]; do
+            print_error "Database host/name/user are required"
+            read -p "Enter database host: " DB_HOST
+            read -p "Enter database name: " DB_NAME
+            read -p "Enter database user: " DB_USER
+        done
+
+        while ! is_valid_port "$DB_PORT"; do
+            print_error "Invalid database port"
+            read -p "Enter database port: " DB_PORT
+        done
     fi
     
     # Admin token
@@ -319,6 +445,12 @@ get_user_input() {
         SMTP_ENABLED="false"
     fi
     
+    if [ "$EXTERNAL_HTTPS_PORT" = "443" ]; then
+        ACCESS_URL="https://$DOMAIN"
+    else
+        ACCESS_URL="https://$DOMAIN:$EXTERNAL_HTTPS_PORT"
+    fi
+
     echo ""
     print_success "Configuration collected"
 }
@@ -330,47 +462,113 @@ get_user_input() {
 setup_certificates() {
     print_step "Setting up SSL certificates..."
     
-    # Stop nginx if running
-    systemctl stop nginx 2>/dev/null || true
-    
     if [ "$CERT_TYPE" = "1" ]; then
-        # Classic certificate
+        # Automatic Let's Encrypt certificate
         print_info "Requesting classic SSL certificate for $DOMAIN..."
+
+        # Stop nginx if running to free standalone challenge port
+        systemctl stop nginx 2>/dev/null || true
+
+        if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]; then
+            print_info "Existing Let's Encrypt certificate found for $DOMAIN, reusing it."
+            SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+            SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+            print_success "SSL certificates ready"
+            return
+        fi
+
         certbot certonly --standalone \
             --non-interactive \
             --agree-tos \
             --email "$EMAIL" \
             -d "$DOMAIN" \
             >> "$LOG_FILE" 2>&1
-    else
-        # Wildcard certificate
-        print_info "Requesting wildcard SSL certificate for *.$DOMAIN..."
-        certbot certonly --manual \
-            --preferred-challenges=dns \
-            --non-interactive \
-            --agree-tos \
-            --email "$EMAIL" \
-            -d "*.$DOMAIN" \
-            -d "$DOMAIN" \
-            >> "$LOG_FILE" 2>&1
-    fi
-    
-    if [ $? -eq 0 ]; then
+
+        SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+        SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
         print_success "SSL certificates obtained successfully"
-        
-        # Extract domain for cert path
-        if [ "$CERT_TYPE" = "2" ]; then
-            CERT_DOMAIN=$(echo "$DOMAIN" | sed 's/^[^.]*\.//')
-        else
-            CERT_DOMAIN="$DOMAIN"
-        fi
-        
-        SSL_CERT="/etc/letsencrypt/live/$CERT_DOMAIN/fullchain.pem"
-        SSL_KEY="/etc/letsencrypt/live/$CERT_DOMAIN/privkey.pem"
-    else
-        print_error "Failed to obtain SSL certificates"
-        exit 1
+        return
     fi
+
+    if [ "$CERT_TYPE" = "2" ]; then
+        mkdir -p "$MANUAL_CERT_DIR"
+
+        WILDCARD_KEY_PATH="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
+        local wildcard_csr="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
+        local wildcard_fullchain="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
+
+        if [ ! -f "$WILDCARD_KEY_PATH" ]; then
+            print_info "Generating private key: $WILDCARD_KEY_PATH"
+            openssl genrsa -out "$WILDCARD_KEY_PATH" 4096 >> "$LOG_FILE" 2>&1
+            chmod 600 "$WILDCARD_KEY_PATH"
+        else
+            print_info "Private key already exists: $WILDCARD_KEY_PATH"
+        fi
+
+        print_info "Generating CSR for *.$WILDCARD_BASE_DOMAIN and $WILDCARD_BASE_DOMAIN..."
+        if ! openssl req -new \
+            -key "$WILDCARD_KEY_PATH" \
+            -out "$wildcard_csr" \
+            -subj "/CN=*.$WILDCARD_BASE_DOMAIN" \
+            -addext "subjectAltName=DNS:$WILDCARD_BASE_DOMAIN,DNS:*.$WILDCARD_BASE_DOMAIN" \
+            >> "$LOG_FILE" 2>&1; then
+            local openssl_cfg
+            openssl_cfg=$(mktemp)
+            cat > "$openssl_cfg" << EOF
+[req]
+distinguished_name = req_dn
+req_extensions = req_ext
+prompt = no
+
+[req_dn]
+CN = *.$WILDCARD_BASE_DOMAIN
+
+[req_ext]
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = $WILDCARD_BASE_DOMAIN
+DNS.2 = *.$WILDCARD_BASE_DOMAIN
+EOF
+            openssl req -new \
+                -key "$WILDCARD_KEY_PATH" \
+                -out "$wildcard_csr" \
+                -config "$openssl_cfg" \
+                >> "$LOG_FILE" 2>&1
+            rm -f "$openssl_cfg"
+        fi
+
+        echo ""
+        print_info "Private key generated: $WILDCARD_KEY_PATH"
+        print_info "CSR generated: $wildcard_csr"
+        print_info "Upload this CSR to your certificate provider, then provide the signed certificate path."
+        echo ""
+
+        read -e -p "Path to signed certificate/fullchain PEM: " WILDCARD_CERT_PATH
+        WILDCARD_CERT_PATH=$(ensure_file_exists "$WILDCARD_CERT_PATH" "signed certificate")
+
+        read -e -p "Path to CA chain PEM (optional, Enter to skip): " WILDCARD_CHAIN_PATH
+        if [ -n "$WILDCARD_CHAIN_PATH" ]; then
+            WILDCARD_CHAIN_PATH=$(ensure_file_exists "$WILDCARD_CHAIN_PATH" "CA chain")
+            cat "$WILDCARD_CERT_PATH" "$WILDCARD_CHAIN_PATH" > "$wildcard_fullchain"
+        else
+            cp "$WILDCARD_CERT_PATH" "$wildcard_fullchain"
+        fi
+        chmod 600 "$wildcard_fullchain"
+
+        SSL_CERT="$wildcard_fullchain"
+        SSL_KEY="$WILDCARD_KEY_PATH"
+        print_success "Manual wildcard certificate imported successfully"
+        return
+    fi
+
+    mkdir -p "$MANUAL_CERT_DIR"
+    SSL_CERT="$MANUAL_CERT_DIR/$(basename "$EXISTING_CERT_PATH")"
+    SSL_KEY="$MANUAL_CERT_DIR/$(basename "$EXISTING_KEY_PATH")"
+    cp "$EXISTING_CERT_PATH" "$SSL_CERT"
+    cp "$EXISTING_KEY_PATH" "$SSL_KEY"
+    chmod 600 "$SSL_CERT" "$SSL_KEY"
+    print_success "Existing certificate and key imported successfully"
 }
 
 # =============================================================================
@@ -385,6 +583,20 @@ create_directories() {
     mkdir -p "$(dirname "$LOG_FILE")"
     
     print_success "Directories created"
+}
+
+validate_database_connection() {
+    if [ "$DB_TYPE" = "1" ]; then
+        return
+    fi
+
+    print_step "Validating external database connectivity..."
+    if timeout 5 bash -c ">/dev/tcp/$DB_HOST/$DB_PORT" 2>/dev/null; then
+        print_success "Database endpoint reachable at $DB_HOST:$DB_PORT"
+    else
+        print_error "Cannot reach database endpoint $DB_HOST:$DB_PORT"
+        exit 1
+    fi
 }
 
 configure_vaultwarden() {
@@ -406,7 +618,7 @@ configure_vaultwarden() {
     # Create .env file
     cat > "$ENV_FILE" << EOF
 # Vaultwarden Configuration
-DOMAIN=https://$DOMAIN
+DOMAIN=$ACCESS_URL
 DATABASE_URL=$DATABASE_URL
 DATA_FOLDER=$DATA_DIR
 WEB_VAULT_ENABLED=true
@@ -490,18 +702,16 @@ EOF
 
 configure_nginx() {
     print_step "Configuring Nginx reverse proxy..."
-    
-    cat > "/etc/nginx/sites-available/vaultwarden" << EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $DOMAIN;
-    return 301 https://\$server_name\$request_uri;
-}
+    local redirect_port_suffix=""
+    if [ "$EXTERNAL_HTTPS_PORT" != "443" ]; then
+        redirect_port_suffix=":$EXTERNAL_HTTPS_PORT"
+    fi
 
+    if [ "$INTERNAL_HTTPS_PORT" = "80" ]; then
+        cat > "$NGINX_SITE" << EOF
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 80 ssl http2;
+    listen [::]:80 ssl http2;
     server_name $DOMAIN;
 
     ssl_certificate $SSL_CERT;
@@ -532,9 +742,52 @@ server {
     }
 }
 EOF
+    else
+        cat > "$NGINX_SITE" << EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN;
+    return 301 https://\$server_name$redirect_port_suffix\$request_uri;
+}
+
+server {
+    listen $INTERNAL_HTTPS_PORT ssl http2;
+    listen [::]:$INTERNAL_HTTPS_PORT ssl http2;
+    server_name $DOMAIN;
+
+    ssl_certificate $SSL_CERT;
+    ssl_certificate_key $SSL_KEY;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+
+    client_max_body_size 525M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /notifications/hub {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location /notifications/hub/negotiate {
+        proxy_pass http://127.0.0.1:8000;
+    }
+}
+EOF
+    fi
 
     # Enable site
-    ln -sf /etc/nginx/sites-available/vaultwarden /etc/nginx/sites-enabled/
+    ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/
     rm -f /etc/nginx/sites-enabled/default
     
     # Test nginx configuration
@@ -561,7 +814,7 @@ configure_firewall() {
             ufw --force enable
             ufw allow 22/tcp
             ufw allow 80/tcp
-            ufw allow 443/tcp
+            ufw allow "$INTERNAL_HTTPS_PORT"/tcp
             ufw reload
             print_success "UFW firewall configured"
             ;;
@@ -570,7 +823,7 @@ configure_firewall() {
             systemctl start firewalld
             firewall-cmd --permanent --add-service=ssh
             firewall-cmd --permanent --add-service=http
-            firewall-cmd --permanent --add-service=https
+            firewall-cmd --permanent --add-port="$INTERNAL_HTTPS_PORT"/tcp
             firewall-cmd --reload
             print_success "Firewalld configured"
             ;;
@@ -583,21 +836,27 @@ configure_firewall() {
 
 create_aliases() {
     print_step "Creating command aliases..."
-    
-    cat >> /root/.bashrc << 'EOF'
 
-# Vaultwarden Management Aliases
+    touch "$ALIAS_FILE"
+    if grep -qF "$ALIAS_MARKER_START" "$ALIAS_FILE"; then
+        sed -i "/$ALIAS_MARKER_START/,/$ALIAS_MARKER_END/d" "$ALIAS_FILE"
+    fi
+
+    cat >> "$ALIAS_FILE" << EOF
+
+$ALIAS_MARKER_START
 alias vw-start='systemctl start vaultwarden'
 alias vw-stop='systemctl stop vaultwarden'
 alias vw-restart='systemctl restart vaultwarden'
 alias vw-status='systemctl status vaultwarden'
 alias vw-logs='journalctl -u vaultwarden -f'
 alias vw-update='docker pull vaultwarden/server:latest && systemctl restart vaultwarden'
-alias vw-backup='tar -czf /root/vaultwarden-backup-$(date +%Y%m%d-%H%M%S).tar.gz /var/lib/vaultwarden'
+alias vw-backup='tar -czf /root/vaultwarden-backup-\$(date +%Y%m%d-%H%M%S).tar.gz /var/lib/vaultwarden'
 alias vw-config='nano /opt/vaultwarden/.env'
 alias vw-admin-key='cat /root/vaultwarden-admin-key.txt'
 alias vw-cleanup='docker stop vaultwarden 2>/dev/null; docker rm vaultwarden 2>/dev/null; systemctl stop vaultwarden 2>/dev/null; echo "Cleanup completed"'
 alias vw-diagnose='echo "=== Service Status ==="; systemctl status vaultwarden; echo ""; echo "=== Docker Logs ==="; docker logs vaultwarden 2>&1 | tail -20; echo ""; echo "=== Port 8000 ==="; ss -tuln | grep 8000'
+$ALIAS_MARKER_END
 EOF
 
     print_success "Command aliases created"
@@ -614,8 +873,8 @@ save_admin_key() {
 Vaultwarden Admin Access Information
 =====================================
 Generated: $(date)
-Domain: https://$DOMAIN
-Admin Panel: https://$DOMAIN/admin
+Domain: $ACCESS_URL
+Admin Panel: $ACCESS_URL/admin
 Admin Token: $ADMIN_TOKEN
 
 Important: Keep this file secure and delete it after noting the token.
@@ -651,14 +910,8 @@ cleanup_existing() {
     
     # Check if port 8000 is in use
     if netstat -tuln 2>/dev/null | grep -q ":8000 " || ss -tuln 2>/dev/null | grep -q ":8000 "; then
-        print_warning "Port 8000 is in use, attempting to free it..."
-        # Find and kill process using port 8000
-        local pid=$(lsof -ti:8000 2>/dev/null || fuser 8000/tcp 2>/dev/null | awk '{print $1}')
-        if [ -n "$pid" ]; then
-            kill -9 "$pid" 2>/dev/null || true
-            sleep 2
-            print_success "Port 8000 freed"
-        fi
+        print_warning "Port 8000 is in use by another process. Not killing it automatically."
+        lsof -nP -iTCP:8000 -sTCP:LISTEN 2>/dev/null || true
     fi
     
     print_success "Cleanup completed"
@@ -729,12 +982,10 @@ start_services() {
     docker rm vaultwarden 2>/dev/null || true
     sleep 3
     
-    # Free port 8000 if needed
-    local pid=$(lsof -ti:8000 2>/dev/null || fuser 8000/tcp 2>/dev/null | awk '{print $1}')
-    if [ -n "$pid" ]; then
-        print_info "Killing process on port 8000 (PID: $pid)..."
-        kill -9 "$pid" 2>/dev/null || true
-        sleep 2
+    # Report port conflict instead of force-killing unknown processes
+    if netstat -tuln 2>/dev/null | grep -q ":8000 " || ss -tuln 2>/dev/null | grep -q ":8000 "; then
+        print_warning "Port 8000 is in use. Resolve this conflict manually before retry."
+        lsof -nP -iTCP:8000 -sTCP:LISTEN 2>/dev/null || true
     fi
     
     # Reload systemd
@@ -772,7 +1023,7 @@ start_services() {
 setup_backup() {
     print_step "Setting up automatic backups..."
     
-    cat > /usr/local/bin/vaultwarden-backup.sh << 'EOF'
+    cat > "$BACKUP_SCRIPT" << 'EOF'
 #!/bin/bash
 BACKUP_DIR="/root/vaultwarden-backups"
 DATE=$(date +%Y%m%d-%H%M%S)
@@ -781,10 +1032,14 @@ tar -czf "$BACKUP_DIR/vaultwarden-$DATE.tar.gz" /var/lib/vaultwarden
 find "$BACKUP_DIR" -name "vaultwarden-*.tar.gz" -mtime +7 -delete
 EOF
 
-    chmod +x /usr/local/bin/vaultwarden-backup.sh
+    chmod +x "$BACKUP_SCRIPT"
     
     # Add cron job for daily backup at 2 AM
-    (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/vaultwarden-backup.sh") | crontab -
+    local current_crontab
+    current_crontab=$(crontab -l 2>/dev/null || true)
+    if ! printf "%s\n" "$current_crontab" | grep -qF "$BACKUP_CRON_LINE"; then
+        (printf "%s\n" "$current_crontab"; echo "$BACKUP_CRON_LINE") | crontab -
+    fi
     
     print_success "Automatic daily backups configured"
 }
@@ -803,9 +1058,10 @@ print_summary() {
     echo -e "${NC}"
     echo ""
     echo -e "${BOLD}Access Information:${NC}"
-    echo "  🌐 URL: https://$DOMAIN"
-    echo "  🔐 Admin Panel: https://$DOMAIN/admin"
+    echo "  🌐 URL: $ACCESS_URL"
+    echo "  🔐 Admin Panel: $ACCESS_URL/admin"
     echo "  🔑 Admin Token: Saved in $ADMIN_KEY_FILE"
+    echo "  🔌 Port Mapping: external $EXTERNAL_HTTPS_PORT -> internal $INTERNAL_HTTPS_PORT"
     echo ""
     echo -e "${YELLOW}${BOLD}⚠ IMPORTANT: Load aliases first!${NC}"
     echo "  Run this command to enable management aliases:"
@@ -867,6 +1123,7 @@ main() {
     install_docker
     create_directories
     setup_certificates
+    validate_database_connection
     configure_vaultwarden
     pull_vaultwarden_image
     create_systemd_service

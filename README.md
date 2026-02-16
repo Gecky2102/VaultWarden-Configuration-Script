@@ -11,7 +11,8 @@ A comprehensive, automated Bash script for deploying and configuring Vaultwarden
 
 ### 🔐 Certificate Management
 - **Classic SSL Certificates**: Single domain certificates via Let's Encrypt
-- **Wildcard Certificates**: Support for wildcard domains (*.example.com)
+- **Wildcard Manual Flow**: Generates private key + CSR, then imports your signed certificate
+- **Existing Certificates**: Import existing `fullchain` and private key by path
 - **Automatic Renewal**: Integrated with certbot for automatic certificate renewal
 - **User-Prompted Configuration**: Interactive prompts for all certificate parameters
 
@@ -38,6 +39,7 @@ A comprehensive, automated Bash script for deploying and configuring Vaultwarden
 
 ### ⚙️ Configuration Management
 - **Interactive Setup**: User-friendly prompts for all configuration options
+- **Custom Port Mapping**: Configure external HTTPS port and internal nginx HTTPS port independently
 - **SMTP Configuration**: Optional email notification setup
 - **Environment Variables**: Organized .env file for easy updates
 - **Nginx Reverse Proxy**: Automatic configuration with SSL/TLS
@@ -66,7 +68,7 @@ The script creates convenient aliases for Vaultwarden management:
 - Linux system (Ubuntu 20.04+, Debian 10+, CentOS 7+, RHEL 7+, Fedora 30+, Arch Linux)
 - Root access (sudo)
 - Domain name pointed to your server's IP address
-- Open ports: 80 (HTTP), 443 (HTTPS), 22 (SSH)
+- Open ports: 22 (SSH), 80 (HTTP) and your chosen internal HTTPS port (default 443)
 
 ## Installation
 
@@ -93,25 +95,29 @@ The script will prompt you for:
 
 1. **Domain Configuration**
    - Your domain name (e.g., vault.example.com)
-   - Email address for Let's Encrypt notifications
 
 2. **Certificate Type**
-   - Option 1: Classic certificate (single domain)
-   - Option 2: Wildcard certificate (*.example.com)
+   - Option 1: Let's Encrypt single-domain certificate (asks email)
+   - Option 2: Wildcard manual flow (generates key + CSR, then asks signed cert path)
+   - Option 3: Existing certificate and key paths
 
-3. **Vaultwarden Version**
+3. **HTTPS Ports**
+   - External HTTPS port (what users hit, e.g. 4443)
+   - Internal nginx HTTPS port (what server listens on, e.g. 80)
+
+4. **Vaultwarden Version**
    - Specific version number or "latest"
 
-4. **Database Configuration**
+5. **Database Configuration**
    - SQLite (default)
    - PostgreSQL (with connection details)
    - MySQL/MariaDB (with connection details)
 
-5. **Admin Token**
+6. **Admin Token**
    - Auto-generate secure token (recommended)
    - Custom token input
 
-6. **SMTP Configuration** (optional)
+7. **SMTP Configuration** (optional)
    - SMTP server details for email notifications
 
 ## Usage
