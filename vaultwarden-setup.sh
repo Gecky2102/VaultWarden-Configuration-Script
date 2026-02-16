@@ -1493,6 +1493,7 @@ echo "  vw-admin-key  Show saved admin token info"
 echo "  vw-cleanup    Stop/remove container + stop service"
 echo "  vw-diagnose   Run quick diagnostics"
 echo "  vw-help       Show this help"
+echo "  vw-edit-config Edit domain/ports (--show, --port, --internal-port, --external-port)"
 echo ""
 
 echo "Important files:"
@@ -1507,6 +1508,364 @@ EOF
 
     chmod +x /usr/local/bin/vw-help
     print_success "vw-help command created"
+}
+
+create_vw_edit_config_command() {
+    print_step "Creating vw-edit-config command..."
+
+    cat > /usr/local/bin/vw-edit-config << EOF
+#!/bin/bash
+set -euo pipefail
+
+ENV_FILE="$ENV_FILE"
+NGINX_SITE="$NGINX_SITE"
+DEFAULT_DOMAIN="$DOMAIN"
+DEFAULT_EXTERNAL_PORT="$EXTERNAL_HTTPS_PORT"
+DEFAULT_INTERNAL_PORT="$INTERNAL_HTTPS_PORT"
+
+die() {
+    echo "Error: \$*" >&2
+    exit 1
+}
+
+is_valid_port() {
+    local port=\$1
+    [[ "\$port" =~ ^[0-9]+$ ]] && [ "\$port" -ge 1 ] && [ "\$port" -le 65535 ]
+}
+
+extract_host_from_url() {
+    local url=\$1
+    echo "\$url" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#/.*\$##' | sed -E 's#:[0-9]+\$##'
+}
+
+extract_port_from_url() {
+    local url=\$1
+    local authority
+    authority=\$(echo "\$url" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#/.*\$##')
+    if [[ "\$authority" == *:* ]]; then
+        echo "\$authority" | sed -E 's#^.*:([0-9]+)\$#\\1#'
+    else
+        echo "443"
+    fi
+}
+
+current_domain() {
+    if [ -f "\$ENV_FILE" ]; then
+        local url
+        url=\$(grep -E '^DOMAIN=' "\$ENV_FILE" | head -n 1 | cut -d'=' -f2- || true)
+        if [ -n "\$url" ]; then
+            extract_host_from_url "\$url"
+            return
+        fi
+    fi
+    echo "\$DEFAULT_DOMAIN"
+}
+
+current_external_port() {
+    if [ -f "\$ENV_FILE" ]; then
+        local url
+        url=\$(grep -E '^DOMAIN=' "\$ENV_FILE" | head -n 1 | cut -d'=' -f2- || true)
+        if [ -n "\$url" ]; then
+            extract_port_from_url "\$url"
+            return
+        fi
+    fi
+    echo "\$DEFAULT_EXTERNAL_PORT"
+}
+
+current_internal_port() {
+    if [ -f "\$NGINX_SITE" ]; then
+        local port
+        port=\$(grep -E '^\\s*listen [0-9]+ ssl http2;' "\$NGINX_SITE" | head -n 1 | awk '{print \$2}' || true)
+        if [ -n "\$port" ]; then
+            echo "\$port"
+            return
+        fi
+        if grep -qE '^\\s*listen 80 ssl http2;' "\$NGINX_SITE"; then
+            echo "80"
+            return
+        fi
+    fi
+    echo "\$DEFAULT_INTERNAL_PORT"
+}
+
+current_ssl_cert() {
+    [ -f "\$NGINX_SITE" ] || die "Nginx site not found: \$NGINX_SITE"
+    grep -E '^\\s*ssl_certificate\\s+' "\$NGINX_SITE" | head -n 1 | awk '{print \$2}' | tr -d ';'
+}
+
+current_ssl_key() {
+    [ -f "\$NGINX_SITE" ] || die "Nginx site not found: \$NGINX_SITE"
+    grep -E '^\\s*ssl_certificate_key\\s+' "\$NGINX_SITE" | head -n 1 | awk '{print \$2}' | tr -d ';'
+}
+
+write_nginx_config() {
+    local domain=\$1
+    local external_port=\$2
+    local internal_port=\$3
+    local ssl_cert=\$4
+    local ssl_key=\$5
+    local redirect_port_suffix=""
+
+    if [ "\$external_port" != "443" ]; then
+        redirect_port_suffix=":\$external_port"
+    fi
+
+    if [ "\$internal_port" = "80" ]; then
+        cat > "\$NGINX_SITE" << EONG
+server {
+    listen 80 ssl http2;
+    listen [::]:80 ssl http2;
+    server_name \$domain;
+
+    ssl_certificate \$ssl_cert;
+    ssl_certificate_key \$ssl_key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+
+    client_max_body_size 525M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /notifications/hub {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location /notifications/hub/negotiate {
+        proxy_pass http://127.0.0.1:8000;
+    }
+}
+EONG
+    else
+        cat > "\$NGINX_SITE" << EONG
+server {
+    listen 80;
+    listen [::]:80;
+    server_name \$domain;
+    return 301 https://\$server_name\${redirect_port_suffix}\$request_uri;
+}
+
+server {
+    listen \$internal_port ssl http2;
+    listen [::]:\$internal_port ssl http2;
+    server_name \$domain;
+
+    ssl_certificate \$ssl_cert;
+    ssl_certificate_key \$ssl_key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+
+    client_max_body_size 525M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /notifications/hub {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location /notifications/hub/negotiate {
+        proxy_pass http://127.0.0.1:8000;
+    }
+}
+EONG
+    fi
+}
+
+update_env_domain() {
+    local domain=\$1
+    local external_port=\$2
+    local access_url
+    if [ "\$external_port" = "443" ]; then
+        access_url="https://\$domain"
+    else
+        access_url="https://\$domain:\$external_port"
+    fi
+
+    if [ -f "\$ENV_FILE" ] && grep -q '^DOMAIN=' "\$ENV_FILE"; then
+        sed -i "s#^DOMAIN=.*#DOMAIN=\$access_url#" "\$ENV_FILE"
+    elif [ -f "\$ENV_FILE" ]; then
+        printf "\\nDOMAIN=%s\\n" "\$access_url" >> "\$ENV_FILE"
+    fi
+    echo "\$access_url"
+}
+
+allow_firewall_port() {
+    local port=\$1
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "\$port"/tcp >/dev/null 2>&1 || true
+        ufw reload >/dev/null 2>&1 || true
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port="\$port"/tcp >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+}
+
+update_motd_context() {
+    local domain=\$1
+    local external_port=\$2
+    local internal_port=\$3
+    local motd_file="/etc/update-motd.d/99-vaultwarden"
+    local external_url
+
+    if [ "\$external_port" = "443" ]; then
+        external_url="https://\$domain"
+    else
+        external_url="https://\$domain:\$external_port"
+    fi
+
+    if [ -f "\$motd_file" ]; then
+        sed -i "s#^MOTD_DOMAIN=.*#MOTD_DOMAIN=\"\$domain\"#" "\$motd_file" || true
+        sed -i "s#^MOTD_INTERNAL_HTTPS_PORT=.*#MOTD_INTERNAL_HTTPS_PORT=\"\$internal_port\"#" "\$motd_file" || true
+        sed -i "s#^EXTERNAL_URL=.*#EXTERNAL_URL=\"\$external_url\"#" "\$motd_file" || true
+    fi
+}
+
+show_current() {
+    local d ep ip cert key
+    d=\$(current_domain)
+    ep=\$(current_external_port)
+    ip=\$(current_internal_port)
+    cert=\$(current_ssl_cert 2>/dev/null || echo "N/A")
+    key=\$(current_ssl_key 2>/dev/null || echo "N/A")
+
+    echo "Current Vaultwarden Network Configuration"
+    echo "  Domain: \$d"
+    echo "  External HTTPS port: \$ep"
+    echo "  Internal HTTPS port: \$ip"
+    echo "  SSL certificate: \$cert"
+    echo "  SSL key: \$key"
+    if [ "\$ep" = "443" ]; then
+        echo "  Access URL: https://\$d"
+    else
+        echo "  Access URL: https://\$d:\$ep"
+    fi
+}
+
+usage() {
+    cat << EOHELP
+Usage: vw-edit-config [options]
+
+Options:
+  --show                     Show current network configuration
+  --port <PORT>              Set both external and internal HTTPS port
+  --internal-port <PORT>     Set only internal nginx HTTPS port
+  --external-port <PORT>     Set only external/public HTTPS port
+  --domain <DOMAIN>          Set domain used for nginx and app URL
+  --help                     Show this help
+
+Examples:
+  vw-edit-config --show
+  vw-edit-config --port 443
+  vw-edit-config --internal-port 443 --external-port 4443 --domain vault.example.com
+EOHELP
+}
+
+main() {
+    [ "\${EUID}" -eq 0 ] || die "Run as root (sudo vw-edit-config ...)"
+
+    local set_port=""
+    local set_internal=""
+    local set_external=""
+    local set_domain=""
+    local show_only="false"
+
+    while [ \$# -gt 0 ]; do
+        case "\$1" in
+            --show) show_only="true"; shift ;;
+            --port) set_port="\${2:-}"; shift 2 ;;
+            --internal-port) set_internal="\${2:-}"; shift 2 ;;
+            --external-port) set_external="\${2:-}"; shift 2 ;;
+            --domain) set_domain="\${2:-}"; shift 2 ;;
+            --help|-h) usage; exit 0 ;;
+            *) die "Unknown option: \$1" ;;
+        esac
+    done
+
+    if [ "\$show_only" = "true" ]; then
+        show_current
+        exit 0
+    fi
+
+    local domain internal_port external_port ssl_cert ssl_key backup_file access_url
+    domain=\$(current_domain)
+    internal_port=\$(current_internal_port)
+    external_port=\$(current_external_port)
+
+    if [ -n "\$set_domain" ]; then
+        domain="\$set_domain"
+    fi
+    if [ -n "\$set_port" ]; then
+        internal_port="\$set_port"
+        external_port="\$set_port"
+    fi
+    if [ -n "\$set_internal" ]; then
+        internal_port="\$set_internal"
+    fi
+    if [ -n "\$set_external" ]; then
+        external_port="\$set_external"
+    fi
+
+    [[ "\$domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+[A-Za-z]{2,}\$ ]] || die "Invalid domain: \$domain"
+    is_valid_port "\$internal_port" || die "Invalid internal port: \$internal_port"
+    is_valid_port "\$external_port" || die "Invalid external port: \$external_port"
+
+    ssl_cert=\$(current_ssl_cert)
+    ssl_key=\$(current_ssl_key)
+    [ -f "\$ssl_cert" ] || die "SSL certificate file not found: \$ssl_cert"
+    [ -f "\$ssl_key" ] || die "SSL key file not found: \$ssl_key"
+
+    backup_file="\$NGINX_SITE.bak.\$(date +%Y%m%d-%H%M%S)"
+    cp "\$NGINX_SITE" "\$backup_file"
+
+    write_nginx_config "\$domain" "\$external_port" "\$internal_port" "\$ssl_cert" "\$ssl_key"
+
+    if ! nginx -t >/dev/null 2>&1; then
+        cp "\$backup_file" "\$NGINX_SITE"
+        die "Nginx config test failed. Restored previous config from \$backup_file"
+    fi
+
+    systemctl restart nginx
+    access_url=\$(update_env_domain "\$domain" "\$external_port")
+    allow_firewall_port "\$internal_port"
+    update_motd_context "\$domain" "\$external_port" "\$internal_port"
+
+    if systemctl list-unit-files 2>/dev/null | grep -q '^vaultwarden.service'; then
+        systemctl restart vaultwarden || true
+    fi
+
+    echo "Updated successfully."
+    echo "  Domain: \$domain"
+    echo "  External HTTPS port: \$external_port"
+    echo "  Internal HTTPS port: \$internal_port"
+    echo "  Access URL: \$access_url"
+    echo "  Backup nginx file: \$backup_file"
+}
+
+main "\$@"
+EOF
+
+    chmod +x /usr/local/bin/vw-edit-config
+    print_success "vw-edit-config command created"
 }
 
 create_aliases() {
@@ -1532,6 +1891,7 @@ alias vw-admin-key='cat /root/vaultwarden-admin-key.txt'
 alias vw-cleanup='docker stop vaultwarden 2>/dev/null; docker rm vaultwarden 2>/dev/null; systemctl stop vaultwarden 2>/dev/null; echo "Cleanup completed"'
 alias vw-diagnose='echo "=== Service Status ==="; systemctl status vaultwarden; echo ""; echo "=== Docker Logs ==="; docker logs vaultwarden 2>&1 | tail -20; echo ""; echo "=== Port 8000 ==="; ss -tuln | grep 8000'
 alias vw-help='/usr/local/bin/vw-help'
+alias vw-edit-config='/usr/local/bin/vw-edit-config'
 $ALIAS_MARKER_END
 EOF
 
@@ -1761,6 +2121,7 @@ print_summary() {
     echo "  vw-cleanup    - Stop and remove containers"
     echo "  vw-diagnose   - Run diagnostics"
     echo "  vw-help       - Show quick help and key info"
+    echo "  vw-edit-config - Edit network/domain config (e.g., --port 443)"
     echo ""
     echo -e "${BOLD}Important Files:${NC}"
     echo "  📁 Data Directory: $DATA_DIR"
@@ -1798,6 +2159,7 @@ main() {
         print_step "Commands-only mode selected"
         load_existing_command_context
         create_vw_help_command
+        create_vw_edit_config_command
         create_aliases
         print_success "Commands-only update completed"
         print_info "Run 'source ~/.bashrc' and then 'vw-help'"
@@ -1825,6 +2187,7 @@ main() {
     configure_firewall
     setup_custom_motd
     create_vw_help_command
+    create_vw_edit_config_command
     create_aliases
     save_admin_key
     setup_backup

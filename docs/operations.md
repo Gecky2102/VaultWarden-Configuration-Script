@@ -22,6 +22,16 @@ Main aliases:
 - `vw-cleanup`
 - `vw-diagnose`
 - `vw-help`
+- `vw-edit-config`
+
+`vw-edit-config` updates live network/domain settings and rewrites nginx safely.
+
+Examples:
+```bash
+vw-edit-config --show
+vw-edit-config --port 443
+vw-edit-config --internal-port 443 --external-port 4443 --domain vault.example.com
+```
 
 ## Logs
 
