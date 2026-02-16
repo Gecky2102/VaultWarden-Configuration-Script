@@ -7,7 +7,12 @@ This script is an interactive Linux installer for Vaultwarden with Docker + syst
 The script verifies:
 - root privileges
 - Linux + systemd support
-- internet connectivity
+
+At startup, you choose one mode:
+- Full setup: complete installation/configuration
+- Commands-only: updates only aliases and `vw-help` command
+
+Internet connectivity check is required only for full setup mode.
 
 ## 2. Cleanup
 

@@ -2,6 +2,8 @@
 
 ## Aliases
 
+If you re-run the installer and choose `Commands-only` mode, it refreshes aliases and `vw-help` without reconfiguring the full stack.
+
 After setup:
 ```bash
 source ~/.bashrc
@@ -19,6 +21,7 @@ Main aliases:
 - `vw-admin-key`
 - `vw-cleanup`
 - `vw-diagnose`
+- `vw-help`
 
 ## Logs
 

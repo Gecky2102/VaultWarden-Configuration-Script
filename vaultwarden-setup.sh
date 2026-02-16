@@ -84,6 +84,7 @@ EXISTING_CERT_PATH=""
 EXISTING_KEY_PATH=""
 SETUP_CUSTOM_MOTD="false"
 SETUP_CUSTOM_MOTD_INPUT=""
+SETUP_MODE="full"
 
 # =============================================================================
 # Logging Functions
@@ -297,6 +298,79 @@ validate_output_path_writable() {
     if [ ! -w "$out_dir" ]; then
         print_error "Output directory is not writable: $out_dir"
         exit 1
+    fi
+}
+
+extract_host_from_url() {
+    local url=$1
+    echo "$url" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#/.*$##' | sed -E 's#:[0-9]+$##'
+}
+
+extract_port_from_url() {
+    local url=$1
+    local authority
+    authority=$(echo "$url" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#/.*$##')
+    if [[ "$authority" == *:* ]]; then
+        echo "$authority" | sed -E 's#^.*:([0-9]+)$#\1#'
+    else
+        echo "443"
+    fi
+}
+
+select_setup_mode() {
+    echo ""
+    echo "Setup Mode:"
+    echo "  1) Full setup (install/configure everything)"
+    echo "  2) Commands only (update aliases + vw-help only)"
+    read -p "Select setup mode [1-2]: " setup_mode_input
+    while [[ ! "$setup_mode_input" =~ ^[1-2]$ ]]; do
+        print_error "Invalid selection"
+        read -p "Select setup mode [1-2]: " setup_mode_input
+    done
+
+    if [ "$setup_mode_input" = "2" ]; then
+        SETUP_MODE="commands"
+    else
+        SETUP_MODE="full"
+    fi
+}
+
+load_existing_command_context() {
+    if [ -f "$ENV_FILE" ]; then
+        local existing_access_url
+        existing_access_url=$(grep -E '^DOMAIN=' "$ENV_FILE" | head -n 1 | cut -d'=' -f2- || true)
+        if [ -n "$existing_access_url" ]; then
+            ACCESS_URL="$existing_access_url"
+        fi
+    fi
+
+    if [ -z "$ACCESS_URL" ]; then
+        read -p "Access URL for vw-help (e.g., https://vault.example.com:4443): " ACCESS_URL
+        while [ -z "$ACCESS_URL" ]; do
+            print_error "Access URL cannot be empty"
+            read -p "Access URL: " ACCESS_URL
+        done
+    fi
+
+    DOMAIN=$(extract_host_from_url "$ACCESS_URL")
+    if [ -z "$DOMAIN" ] || ! is_valid_domain_name "$DOMAIN"; then
+        read -p "Domain for vw-help (e.g., vault.example.com): " DOMAIN
+        while [ -z "$DOMAIN" ] || ! is_valid_domain_name "$DOMAIN"; do
+            print_error "Invalid domain format"
+            read -p "Domain for vw-help: " DOMAIN
+        done
+    fi
+
+    EXTERNAL_HTTPS_PORT=$(extract_port_from_url "$ACCESS_URL")
+    if ! is_valid_port "$EXTERNAL_HTTPS_PORT"; then
+        EXTERNAL_HTTPS_PORT="443"
+    fi
+
+    if [ -f "$NGINX_SITE" ]; then
+        INTERNAL_HTTPS_PORT=$(grep -E '^\s*listen [0-9]+ ssl http2;' "$NGINX_SITE" | head -n 1 | awk '{print $2}' || true)
+    fi
+    if ! is_valid_port "${INTERNAL_HTTPS_PORT:-}"; then
+        INTERNAL_HTTPS_PORT="$EXTERNAL_HTTPS_PORT"
     fi
 }
 
@@ -1384,6 +1458,57 @@ EOF
 # Command Aliases
 # =============================================================================
 
+create_vw_help_command() {
+    print_step "Creating vw-help command..."
+
+    cat > /usr/local/bin/vw-help << EOF
+#!/bin/bash
+
+echo "=== Vaultwarden Quick Help ==="
+echo ""
+echo "Access:"
+echo "  URL: $ACCESS_URL"
+echo "  Admin: $ACCESS_URL/admin"
+echo "  Domain: $DOMAIN"
+echo "  Port Mapping: external $EXTERNAL_HTTPS_PORT -> internal $INTERNAL_HTTPS_PORT"
+echo ""
+
+echo "Status:"
+echo "  Vaultwarden service: \$(systemctl is-active vaultwarden 2>/dev/null || echo unknown)"
+echo "  Nginx service: \$(systemctl is-active nginx 2>/dev/null || echo unknown)"
+echo "  Docker service: \$(systemctl is-active docker 2>/dev/null || echo unknown)"
+echo "  Container: \$(docker ps --format '{{.Names}}' | grep -E '^vaultwarden$' >/dev/null && echo running || echo not-running)"
+echo ""
+
+echo "Commands:"
+echo "  vw-start      Start Vaultwarden"
+echo "  vw-stop       Stop Vaultwarden"
+echo "  vw-restart    Restart Vaultwarden"
+echo "  vw-status     Service status"
+echo "  vw-logs       Live journal logs"
+echo "  vw-update     Pull latest image + restart"
+echo "  vw-backup     Create manual backup archive"
+echo "  vw-config     Edit .env config"
+echo "  vw-admin-key  Show saved admin token info"
+echo "  vw-cleanup    Stop/remove container + stop service"
+echo "  vw-diagnose   Run quick diagnostics"
+echo "  vw-help       Show this help"
+echo ""
+
+echo "Important files:"
+echo "  Env: $ENV_FILE"
+echo "  Data: $DATA_DIR"
+echo "  Log: $LOG_FILE"
+echo "  Admin key: $ADMIN_KEY_FILE"
+echo "  Service: $SYSTEMD_SERVICE"
+echo "  Nginx site: $NGINX_SITE"
+echo ""
+EOF
+
+    chmod +x /usr/local/bin/vw-help
+    print_success "vw-help command created"
+}
+
 create_aliases() {
     print_step "Creating command aliases..."
 
@@ -1406,6 +1531,7 @@ alias vw-config='nano /opt/vaultwarden/.env'
 alias vw-admin-key='cat /root/vaultwarden-admin-key.txt'
 alias vw-cleanup='docker stop vaultwarden 2>/dev/null; docker rm vaultwarden 2>/dev/null; systemctl stop vaultwarden 2>/dev/null; echo "Cleanup completed"'
 alias vw-diagnose='echo "=== Service Status ==="; systemctl status vaultwarden; echo ""; echo "=== Docker Logs ==="; docker logs vaultwarden 2>&1 | tail -20; echo ""; echo "=== Port 8000 ==="; ss -tuln | grep 8000'
+alias vw-help='/usr/local/bin/vw-help'
 $ALIAS_MARKER_END
 EOF
 
@@ -1634,6 +1760,7 @@ print_summary() {
     echo "  vw-admin-key  - Display admin token"
     echo "  vw-cleanup    - Stop and remove containers"
     echo "  vw-diagnose   - Run diagnostics"
+    echo "  vw-help       - Show quick help and key info"
     echo ""
     echo -e "${BOLD}Important Files:${NC}"
     echo "  📁 Data Directory: $DATA_DIR"
@@ -1665,6 +1792,18 @@ main() {
     print_header
     check_root
     check_os
+    select_setup_mode
+
+    if [ "$SETUP_MODE" = "commands" ]; then
+        print_step "Commands-only mode selected"
+        load_existing_command_context
+        create_vw_help_command
+        create_aliases
+        print_success "Commands-only update completed"
+        print_info "Run 'source ~/.bashrc' and then 'vw-help'"
+        return
+    fi
+
     check_internet
     
     # Cleanup existing installation
@@ -1685,6 +1824,7 @@ main() {
     configure_nginx
     configure_firewall
     setup_custom_motd
+    create_vw_help_command
     create_aliases
     save_admin_key
     setup_backup
