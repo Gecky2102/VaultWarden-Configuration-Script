@@ -529,8 +529,6 @@ get_user_input() {
 
         local default_key_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
         local default_csr_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
-        local default_signed_cert_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.signed.fullchain.pem"
-        local default_fullchain_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
 
         read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
         while [ -z "$WILDCARD_ORGANIZATION" ]; do
@@ -543,13 +541,6 @@ get_user_input() {
 
         read -e -p "Path for wildcard CSR [$default_csr_path]: " WILDCARD_CSR_PATH
         WILDCARD_CSR_PATH=${WILDCARD_CSR_PATH:-$default_csr_path}
-
-        read -e -p "Path where you will place signed wildcard fullchain [$default_signed_cert_path]: " WILDCARD_CERT_PATH
-        WILDCARD_CERT_PATH=${WILDCARD_CERT_PATH:-$default_signed_cert_path}
-
-        read -e -p "Path for final wildcard fullchain used by nginx [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
-        WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-$default_fullchain_path}
-        validate_output_path_writable "$WILDCARD_FULLCHAIN_PATH"
     elif [ "$CERT_TYPE" = "3" ]; then
         read -e -p "Path to existing fullchain certificate: " EXISTING_CERT_PATH
         EXISTING_CERT_PATH=$(ensure_file_exists "$EXISTING_CERT_PATH" "certificate file")
@@ -828,9 +819,20 @@ EOF
             print_info "CSR: $WILDCARD_CSR_PATH"
         fi
 
-        if [ -z "$WILDCARD_CERT_PATH" ]; then
+        if [ "$CERT_TYPE" = "2" ]; then
+            local default_signed_cert_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.signed.fullchain.pem"
+            local default_fullchain_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
+
+            read -e -p "Path where you will place signed wildcard fullchain [$default_signed_cert_path]: " WILDCARD_CERT_PATH
+            WILDCARD_CERT_PATH=${WILDCARD_CERT_PATH:-$default_signed_cert_path}
+
+            read -e -p "Path for final wildcard fullchain used by nginx [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
+            WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-$default_fullchain_path}
+            validate_output_path_writable "$WILDCARD_FULLCHAIN_PATH"
+        elif [ -z "$WILDCARD_CERT_PATH" ]; then
             WILDCARD_CERT_PATH="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.signed.fullchain.pem"
         fi
+
         print_info "Place the signed wildcard fullchain at: $WILDCARD_CERT_PATH"
         WILDCARD_CERT_PATH=$(wait_for_existing_file "$WILDCARD_CERT_PATH" "signed certificate/fullchain")
         validate_certificate_file "$WILDCARD_CERT_PATH"
