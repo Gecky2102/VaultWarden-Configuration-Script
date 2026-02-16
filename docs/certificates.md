@@ -16,7 +16,7 @@ Use this when certificates are issued from your own PKI, panel, or provider.
 Flow:
 1. script generates private key in `/etc/ssl/vaultwarden/<base-domain>.key`
 2. script generates CSR in `/etc/ssl/vaultwarden/<base-domain>.csr`
-   - CSR includes mandatory `Organization (O)` field
+   - CSR includes `C`, `ST`, `L`, `O` and optional `OU`
 3. you upload CSR to your certificate platform
 4. you place the signed fullchain PEM in the configured input path
 5. you confirm and the script validates/imports it for nginx
@@ -52,6 +52,7 @@ Imported/generated key and fullchain are set to restrictive permissions (`chmod 
 Before continuing, the script validates:
 - private key format
 - CSR format (when wildcard flow is used)
+- CSR required subject fields (`C`, `ST`, `L`, `O`)
 - certificate format
 - key/certificate match
 - domain format and email format

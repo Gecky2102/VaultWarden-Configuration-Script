@@ -71,7 +71,11 @@ EXTERNAL_HTTPS_PORT="443"
 INTERNAL_HTTPS_PORT="443"
 ACCESS_URL=""
 WILDCARD_BASE_DOMAIN=""
+WILDCARD_COUNTRY=""
+WILDCARD_STATE=""
+WILDCARD_LOCALITY=""
 WILDCARD_ORGANIZATION=""
+WILDCARD_ORG_UNIT=""
 WILDCARD_CERT_PATH=""
 WILDCARD_KEY_PATH=""
 WILDCARD_CSR_PATH=""
@@ -221,6 +225,11 @@ is_valid_email_address() {
     [[ "$email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
 }
 
+is_valid_country_code() {
+    local code=$1
+    [[ "$code" =~ ^[A-Za-z]{2}$ ]]
+}
+
 domain_matches_pattern() {
     local domain=$1
     local pattern=$2
@@ -262,6 +271,18 @@ validate_certificate_covers_domain() {
         print_error "Certificate does not cover domain '$expected_domain': $cert_path"
         exit 1
     fi
+}
+
+validate_csr_contains_required_subject_fields() {
+    local csr_path=$1
+    local subject
+    subject=$(openssl req -in "$csr_path" -noout -subject -nameopt RFC2253 2>/dev/null || true)
+    for field in C ST L O; do
+        if ! printf "%s" "$subject" | grep -Eq "(^|,)${field}="; then
+            print_error "CSR missing required field ${field}: $csr_path"
+            exit 1
+        fi
+    done
 }
 
 validate_output_path_writable() {
@@ -530,11 +551,32 @@ get_user_input() {
         local default_key_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
         local default_csr_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
 
+        read -p "Country (C, 2 letters) for wildcard CSR: " WILDCARD_COUNTRY
+        while ! is_valid_country_code "$WILDCARD_COUNTRY"; do
+            print_error "Country must be a 2-letter code (e.g., IT)"
+            read -p "Country (C, 2 letters) for wildcard CSR: " WILDCARD_COUNTRY
+        done
+        WILDCARD_COUNTRY=$(echo "$WILDCARD_COUNTRY" | tr '[:lower:]' '[:upper:]')
+
+        read -p "State/Province (ST) for wildcard CSR: " WILDCARD_STATE
+        while [ -z "$WILDCARD_STATE" ]; do
+            print_error "State/Province (ST) cannot be empty"
+            read -p "State/Province (ST) for wildcard CSR: " WILDCARD_STATE
+        done
+
+        read -p "City/Locality (L) for wildcard CSR: " WILDCARD_LOCALITY
+        while [ -z "$WILDCARD_LOCALITY" ]; do
+            print_error "City/Locality (L) cannot be empty"
+            read -p "City/Locality (L) for wildcard CSR: " WILDCARD_LOCALITY
+        done
+
         read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
         while [ -z "$WILDCARD_ORGANIZATION" ]; do
             print_error "Organization (O) cannot be empty"
             read -p "Organization (O) for wildcard CSR: " WILDCARD_ORGANIZATION
         done
+
+        read -p "Organizational Unit (OU) for wildcard CSR (optional): " WILDCARD_ORG_UNIT
 
         read -e -p "Path for wildcard private key [$default_key_path]: " WILDCARD_KEY_PATH
         WILDCARD_KEY_PATH=${WILDCARD_KEY_PATH:-$default_key_path}
@@ -584,6 +626,7 @@ get_user_input() {
         WILDCARD_CSR_PATH=$(ensure_file_exists "$WILDCARD_CSR_PATH" "wildcard CSR")
         validate_csr_file "$WILDCARD_CSR_PATH"
         validate_csr_contains_organization "$WILDCARD_CSR_PATH"
+        validate_csr_contains_required_subject_fields "$WILDCARD_CSR_PATH"
 
         read -e -p "Path where signed wildcard fullchain is/will be available [$default_signed_cert_path]: " WILDCARD_CERT_PATH
         WILDCARD_CERT_PATH=${WILDCARD_CERT_PATH:-$default_signed_cert_path}
@@ -766,11 +809,21 @@ setup_certificates() {
             fi
 
             print_info "Generating CSR for *.$WILDCARD_BASE_DOMAIN and $WILDCARD_BASE_DOMAIN..."
-            local csr_organization="${WILDCARD_ORGANIZATION//\//-}"
+            local csr_country csr_state csr_locality csr_organization csr_org_unit
+            csr_country="${WILDCARD_COUNTRY//\//-}"
+            csr_state="${WILDCARD_STATE//\//-}"
+            csr_locality="${WILDCARD_LOCALITY//\//-}"
+            csr_organization="${WILDCARD_ORGANIZATION//\//-}"
+            csr_org_unit="${WILDCARD_ORG_UNIT//\//-}"
+            local subj="/C=$csr_country/ST=$csr_state/L=$csr_locality/O=$csr_organization"
+            if [ -n "$csr_org_unit" ]; then
+                subj="$subj/OU=$csr_org_unit"
+            fi
+            subj="$subj/CN=*.$WILDCARD_BASE_DOMAIN"
             if ! openssl req -new \
                 -key "$WILDCARD_KEY_PATH" \
                 -out "$WILDCARD_CSR_PATH" \
-                -subj "/O=$csr_organization/CN=*.$WILDCARD_BASE_DOMAIN" \
+                -subj "$subj" \
                 -addext "subjectAltName=DNS:$WILDCARD_BASE_DOMAIN,DNS:*.$WILDCARD_BASE_DOMAIN" \
                 >> "$LOG_FILE" 2>&1; then
                 local openssl_cfg
@@ -782,7 +835,11 @@ req_extensions = req_ext
 prompt = no
 
 [req_dn]
+C = $csr_country
+ST = $csr_state
+L = $csr_locality
 O = $csr_organization
+OU = $csr_org_unit
 CN = *.$WILDCARD_BASE_DOMAIN
 
 [req_ext]
@@ -803,6 +860,7 @@ EOF
             validate_private_key_file "$WILDCARD_KEY_PATH"
             validate_csr_file "$WILDCARD_CSR_PATH"
             validate_csr_contains_organization "$WILDCARD_CSR_PATH"
+            validate_csr_contains_required_subject_fields "$WILDCARD_CSR_PATH"
 
             echo ""
             print_info "Private key generated: $WILDCARD_KEY_PATH"
@@ -814,6 +872,7 @@ EOF
             validate_private_key_file "$WILDCARD_KEY_PATH"
             validate_csr_file "$WILDCARD_CSR_PATH"
             validate_csr_contains_organization "$WILDCARD_CSR_PATH"
+            validate_csr_contains_required_subject_fields "$WILDCARD_CSR_PATH"
             print_info "Resuming wildcard flow with existing key/CSR:"
             print_info "Private key: $WILDCARD_KEY_PATH"
             print_info "CSR: $WILDCARD_CSR_PATH"
