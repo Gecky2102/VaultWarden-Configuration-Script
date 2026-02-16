@@ -74,8 +74,12 @@ WILDCARD_BASE_DOMAIN=""
 WILDCARD_CERT_PATH=""
 WILDCARD_CHAIN_PATH=""
 WILDCARD_KEY_PATH=""
+WILDCARD_CSR_PATH=""
+WILDCARD_FULLCHAIN_PATH=""
 EXISTING_CERT_PATH=""
 EXISTING_KEY_PATH=""
+SETUP_CUSTOM_MOTD="false"
+SETUP_CUSTOM_MOTD_INPUT=""
 
 # =============================================================================
 # Logging Functions
@@ -145,6 +149,42 @@ ensure_file_exists() {
         read -e -p "Insert a valid path for $description: " file_path
     done
     echo "$file_path"
+}
+
+validate_private_key_file() {
+    local key_path=$1
+    if ! openssl pkey -in "$key_path" -noout >/dev/null 2>&1; then
+        print_error "Invalid private key file: $key_path"
+        exit 1
+    fi
+}
+
+validate_csr_file() {
+    local csr_path=$1
+    if ! openssl req -in "$csr_path" -noout >/dev/null 2>&1; then
+        print_error "Invalid CSR file: $csr_path"
+        exit 1
+    fi
+}
+
+validate_certificate_file() {
+    local cert_path=$1
+    if ! openssl x509 -in "$cert_path" -noout >/dev/null 2>&1; then
+        print_error "Invalid certificate file: $cert_path"
+        exit 1
+    fi
+}
+
+validate_key_matches_certificate() {
+    local key_path=$1
+    local cert_path=$2
+    local key_pub cert_pub
+    key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $2}')
+    cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $2}')
+    if [ -z "$key_pub" ] || [ -z "$cert_pub" ] || [ "$key_pub" != "$cert_pub" ]; then
+        print_error "Private key does not match certificate: key=$key_path cert=$cert_path"
+        exit 1
+    fi
 }
 
 # =============================================================================
@@ -322,10 +362,11 @@ get_user_input() {
     echo "  1) Let's Encrypt (single domain, automatic)"
     echo "  2) Wildcard manual flow (generate private key + CSR, then import signed cert)"
     echo "  3) Use existing certificate and key paths"
-    read -p "Select certificate type [1-3]: " CERT_TYPE
-    while [[ ! "$CERT_TYPE" =~ ^[1-3]$ ]]; do
+    echo "  4) Resume wildcard flow from existing generated key/CSR"
+    read -p "Select certificate type [1-4]: " CERT_TYPE
+    while [[ ! "$CERT_TYPE" =~ ^[1-4]$ ]]; do
         print_error "Invalid selection"
-        read -p "Select certificate type [1-3]: " CERT_TYPE
+        read -p "Select certificate type [1-4]: " CERT_TYPE
     done
 
     if [ "$CERT_TYPE" = "1" ]; then
@@ -347,11 +388,49 @@ get_user_input() {
             print_error "Invalid wildcard base domain"
             read -p "Enter wildcard base domain (e.g., example.com): " WILDCARD_BASE_DOMAIN
         done
-    else
+
+        local default_key_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
+        local default_csr_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
+        local default_fullchain_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
+
+        read -e -p "Path for wildcard private key [$default_key_path]: " WILDCARD_KEY_PATH
+        WILDCARD_KEY_PATH=${WILDCARD_KEY_PATH:-$default_key_path}
+
+        read -e -p "Path for wildcard CSR [$default_csr_path]: " WILDCARD_CSR_PATH
+        WILDCARD_CSR_PATH=${WILDCARD_CSR_PATH:-$default_csr_path}
+
+        read -e -p "Path for wildcard fullchain output [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
+        WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-$default_fullchain_path}
+    elif [ "$CERT_TYPE" = "3" ]; then
         read -e -p "Path to existing fullchain certificate: " EXISTING_CERT_PATH
         EXISTING_CERT_PATH=$(ensure_file_exists "$EXISTING_CERT_PATH" "certificate file")
+        validate_certificate_file "$EXISTING_CERT_PATH"
         read -e -p "Path to existing private key: " EXISTING_KEY_PATH
         EXISTING_KEY_PATH=$(ensure_file_exists "$EXISTING_KEY_PATH" "private key")
+        validate_private_key_file "$EXISTING_KEY_PATH"
+        validate_key_matches_certificate "$EXISTING_KEY_PATH" "$EXISTING_CERT_PATH"
+    else
+        read -p "Enter wildcard base domain used before (e.g., example.com): " WILDCARD_BASE_DOMAIN
+        while [ -z "$WILDCARD_BASE_DOMAIN" ] || [[ ! "$WILDCARD_BASE_DOMAIN" =~ \. ]]; do
+            print_error "Invalid wildcard base domain"
+            read -p "Enter wildcard base domain (e.g., example.com): " WILDCARD_BASE_DOMAIN
+        done
+
+        local default_key_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
+        local default_csr_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
+        local default_fullchain_path="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
+        read -e -p "Path to existing wildcard private key [$default_key_path]: " WILDCARD_KEY_PATH
+        WILDCARD_KEY_PATH=${WILDCARD_KEY_PATH:-$default_key_path}
+        WILDCARD_KEY_PATH=$(ensure_file_exists "$WILDCARD_KEY_PATH" "wildcard private key")
+        validate_private_key_file "$WILDCARD_KEY_PATH"
+
+        read -e -p "Path to existing wildcard CSR [$default_csr_path]: " WILDCARD_CSR_PATH
+        WILDCARD_CSR_PATH=${WILDCARD_CSR_PATH:-$default_csr_path}
+        WILDCARD_CSR_PATH=$(ensure_file_exists "$WILDCARD_CSR_PATH" "wildcard CSR")
+        validate_csr_file "$WILDCARD_CSR_PATH"
+
+        read -e -p "Path for wildcard fullchain output [$default_fullchain_path]: " WILDCARD_FULLCHAIN_PATH
+        WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-$default_fullchain_path}
     fi
 
     echo ""
@@ -451,6 +530,14 @@ get_user_input() {
     fi
 
     echo ""
+    read -p "Install custom Vaultwarden MOTD dashboard? [Y/n]: " SETUP_CUSTOM_MOTD_INPUT
+    if [[ "$SETUP_CUSTOM_MOTD_INPUT" =~ ^[Nn]$ ]]; then
+        SETUP_CUSTOM_MOTD="false"
+    else
+        SETUP_CUSTOM_MOTD="true"
+    fi
+
+    echo ""
     print_success "Configuration collected"
 }
 
@@ -489,31 +576,37 @@ setup_certificates() {
         return
     fi
 
-    if [ "$CERT_TYPE" = "2" ]; then
+    if [ "$CERT_TYPE" = "2" ] || [ "$CERT_TYPE" = "4" ]; then
         mkdir -p "$MANUAL_CERT_DIR"
 
-        WILDCARD_KEY_PATH="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"
-        local wildcard_csr="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"
-        local wildcard_fullchain="$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"
-
-        if [ ! -f "$WILDCARD_KEY_PATH" ]; then
-            print_info "Generating private key: $WILDCARD_KEY_PATH"
-            openssl genrsa -out "$WILDCARD_KEY_PATH" 4096 >> "$LOG_FILE" 2>&1
-            chmod 600 "$WILDCARD_KEY_PATH"
+        if [ "$CERT_TYPE" = "2" ]; then
+            WILDCARD_KEY_PATH=${WILDCARD_KEY_PATH:-"$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.key"}
+            WILDCARD_CSR_PATH=${WILDCARD_CSR_PATH:-"$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.csr"}
+            WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-"$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"}
         else
-            print_info "Private key already exists: $WILDCARD_KEY_PATH"
+            WILDCARD_FULLCHAIN_PATH=${WILDCARD_FULLCHAIN_PATH:-"$MANUAL_CERT_DIR/${WILDCARD_BASE_DOMAIN}.fullchain.pem"}
         fi
 
-        print_info "Generating CSR for *.$WILDCARD_BASE_DOMAIN and $WILDCARD_BASE_DOMAIN..."
-        if ! openssl req -new \
-            -key "$WILDCARD_KEY_PATH" \
-            -out "$wildcard_csr" \
-            -subj "/CN=*.$WILDCARD_BASE_DOMAIN" \
-            -addext "subjectAltName=DNS:$WILDCARD_BASE_DOMAIN,DNS:*.$WILDCARD_BASE_DOMAIN" \
-            >> "$LOG_FILE" 2>&1; then
-            local openssl_cfg
-            openssl_cfg=$(mktemp)
-            cat > "$openssl_cfg" << EOF
+        if [ "$CERT_TYPE" = "2" ]; then
+            mkdir -p "$(dirname "$WILDCARD_KEY_PATH")" "$(dirname "$WILDCARD_CSR_PATH")" "$(dirname "$WILDCARD_FULLCHAIN_PATH")"
+            if [ ! -f "$WILDCARD_KEY_PATH" ]; then
+                print_info "Generating private key: $WILDCARD_KEY_PATH"
+                openssl genrsa -out "$WILDCARD_KEY_PATH" 4096 >> "$LOG_FILE" 2>&1
+                chmod 600 "$WILDCARD_KEY_PATH"
+            else
+                print_info "Private key already exists: $WILDCARD_KEY_PATH"
+            fi
+
+            print_info "Generating CSR for *.$WILDCARD_BASE_DOMAIN and $WILDCARD_BASE_DOMAIN..."
+            if ! openssl req -new \
+                -key "$WILDCARD_KEY_PATH" \
+                -out "$WILDCARD_CSR_PATH" \
+                -subj "/CN=*.$WILDCARD_BASE_DOMAIN" \
+                -addext "subjectAltName=DNS:$WILDCARD_BASE_DOMAIN,DNS:*.$WILDCARD_BASE_DOMAIN" \
+                >> "$LOG_FILE" 2>&1; then
+                local openssl_cfg
+                openssl_cfg=$(mktemp)
+                cat > "$openssl_cfg" << EOF
 [req]
 distinguished_name = req_dn
 req_extensions = req_ext
@@ -529,33 +622,46 @@ subjectAltName = @alt_names
 DNS.1 = $WILDCARD_BASE_DOMAIN
 DNS.2 = *.$WILDCARD_BASE_DOMAIN
 EOF
-            openssl req -new \
-                -key "$WILDCARD_KEY_PATH" \
-                -out "$wildcard_csr" \
-                -config "$openssl_cfg" \
-                >> "$LOG_FILE" 2>&1
-            rm -f "$openssl_cfg"
-        fi
+                openssl req -new \
+                    -key "$WILDCARD_KEY_PATH" \
+                    -out "$WILDCARD_CSR_PATH" \
+                    -config "$openssl_cfg" \
+                    >> "$LOG_FILE" 2>&1
+                rm -f "$openssl_cfg"
+            fi
 
-        echo ""
-        print_info "Private key generated: $WILDCARD_KEY_PATH"
-        print_info "CSR generated: $wildcard_csr"
-        print_info "Upload this CSR to your certificate provider, then provide the signed certificate path."
-        echo ""
+            validate_private_key_file "$WILDCARD_KEY_PATH"
+            validate_csr_file "$WILDCARD_CSR_PATH"
+
+            echo ""
+            print_info "Private key generated: $WILDCARD_KEY_PATH"
+            print_info "CSR generated: $WILDCARD_CSR_PATH"
+            print_info "Upload this CSR to your certificate provider, then provide the signed certificate path."
+            echo ""
+        else
+            validate_private_key_file "$WILDCARD_KEY_PATH"
+            validate_csr_file "$WILDCARD_CSR_PATH"
+            print_info "Resuming wildcard flow with existing key/CSR:"
+            print_info "Private key: $WILDCARD_KEY_PATH"
+            print_info "CSR: $WILDCARD_CSR_PATH"
+        fi
 
         read -e -p "Path to signed certificate/fullchain PEM: " WILDCARD_CERT_PATH
         WILDCARD_CERT_PATH=$(ensure_file_exists "$WILDCARD_CERT_PATH" "signed certificate")
+        validate_certificate_file "$WILDCARD_CERT_PATH"
+        validate_key_matches_certificate "$WILDCARD_KEY_PATH" "$WILDCARD_CERT_PATH"
 
         read -e -p "Path to CA chain PEM (optional, Enter to skip): " WILDCARD_CHAIN_PATH
         if [ -n "$WILDCARD_CHAIN_PATH" ]; then
             WILDCARD_CHAIN_PATH=$(ensure_file_exists "$WILDCARD_CHAIN_PATH" "CA chain")
-            cat "$WILDCARD_CERT_PATH" "$WILDCARD_CHAIN_PATH" > "$wildcard_fullchain"
+            validate_certificate_file "$WILDCARD_CHAIN_PATH"
+            cat "$WILDCARD_CERT_PATH" "$WILDCARD_CHAIN_PATH" > "$WILDCARD_FULLCHAIN_PATH"
         else
-            cp "$WILDCARD_CERT_PATH" "$wildcard_fullchain"
+            cp "$WILDCARD_CERT_PATH" "$WILDCARD_FULLCHAIN_PATH"
         fi
-        chmod 600 "$wildcard_fullchain"
+        chmod 600 "$WILDCARD_FULLCHAIN_PATH"
 
-        SSL_CERT="$wildcard_fullchain"
+        SSL_CERT="$WILDCARD_FULLCHAIN_PATH"
         SSL_KEY="$WILDCARD_KEY_PATH"
         print_success "Manual wildcard certificate imported successfully"
         return
@@ -564,6 +670,9 @@ EOF
     mkdir -p "$MANUAL_CERT_DIR"
     SSL_CERT="$MANUAL_CERT_DIR/$(basename "$EXISTING_CERT_PATH")"
     SSL_KEY="$MANUAL_CERT_DIR/$(basename "$EXISTING_KEY_PATH")"
+    validate_certificate_file "$EXISTING_CERT_PATH"
+    validate_private_key_file "$EXISTING_KEY_PATH"
+    validate_key_matches_certificate "$EXISTING_KEY_PATH" "$EXISTING_CERT_PATH"
     cp "$EXISTING_CERT_PATH" "$SSL_CERT"
     cp "$EXISTING_KEY_PATH" "$SSL_KEY"
     chmod 600 "$SSL_CERT" "$SSL_KEY"
@@ -830,6 +939,165 @@ configure_firewall() {
 }
 
 # =============================================================================
+# MOTD Configuration
+# =============================================================================
+
+setup_custom_motd() {
+    print_step "Configuring MOTD scripts..."
+    mkdir -p /etc/update-motd.d
+
+    shopt -s nullglob
+    local motd_files=(/etc/update-motd.d/*)
+    if [ ${#motd_files[@]} -gt 0 ]; then
+        chmod -x /etc/update-motd.d/* || true
+    fi
+    shopt -u nullglob
+    print_success "Default MOTD scripts disabled"
+
+    if [ "$SETUP_CUSTOM_MOTD" != "true" ]; then
+        print_info "Custom MOTD skipped by user choice."
+        return
+    fi
+
+    cat > /etc/update-motd.d/99-vaultwarden << EOF
+#!/bin/bash
+
+CONTAINER="vaultwarden"
+EXTERNAL_URL="$ACCESS_URL"
+
+# Controllo stato container
+if docker ps --format '{{.Names}}' | grep -q "^\${CONTAINER}\$"; then
+    STATUS="🟢 Running"
+else
+    STATUS="🔴 Not Running"
+fi
+
+# Uptime container
+UPTIME=\$(docker inspect -f '{{.State.StartedAt}}' "\$CONTAINER" 2>/dev/null)
+
+if [ -n "\$UPTIME" ]; then
+    START_TIME=\$(date -d "\$UPTIME" +%s 2>/dev/null)
+    NOW=\$(date +%s)
+    if [ -n "\$START_TIME" ]; then
+        DIFF=\$((NOW - START_TIME))
+        DAYS=\$((DIFF/86400))
+        HOURS=\$(((DIFF%86400)/3600))
+        MINUTES=\$(((DIFF%3600)/60))
+        UPTIME_STR="\${DAYS}g \${HOURS}h \${MINUTES}m"
+    else
+        UPTIME_STR="N/A"
+    fi
+else
+    UPTIME_STR="N/A"
+fi
+
+# Health check esterno (max 3s). Non stampa HTML, solo status code
+HTTP_CODE=\$(curl -k -sS -o /dev/null -m 3 -w "%{http_code}" "\$EXTERNAL_URL" 2>/dev/null || true)
+if [[ "\$HTTP_CODE" =~ ^(2|3) ]]; then
+    EXT_STATUS="🟢 OK (\$HTTP_CODE)"
+elif [ -n "\$HTTP_CODE" ] && [ "\$HTTP_CODE" != "000" ]; then
+    EXT_STATUS="🟠 Risponde ma errore (\$HTTP_CODE)"
+else
+    EXT_STATUS="🔴 KO (timeout/DNS/TLS)"
+fi
+
+# Docker stats
+DOCKER_VER=\$(docker --version 2>/dev/null | sed 's/,.*//')
+RUNNING_C=\$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+TOTAL_C=\$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')
+STOPPED_C=\$((TOTAL_C - RUNNING_C))
+
+# RAM del container (se running)
+VW_MEM="N/A"
+if docker ps --format '{{.Names}}' | grep -q "^\${CONTAINER}\$"; then
+    VW_MEM=\$(docker stats --no-stream --format "{{.MemUsage}}" "\$CONTAINER" 2>/dev/null)
+    [ -z "\$VW_MEM" ] && VW_MEM="N/A"
+fi
+
+# Sicurezza / SSH info (no ufw/fail2ban)
+SSH_PORT=\$(ss -ltn 2>/dev/null | awk '\$4 ~ /:22\$/ {found=1} END{ if(found) print "22"; }')
+if [ -z "\$SSH_PORT" ]; then
+    SSH_PORT=\$(ss -ltnp 2>/dev/null | awk '/sshd/ {split(\$4,a,":"); print a[length(a)]; exit}')
+fi
+[ -z "\$SSH_PORT" ] && SSH_PORT="N/A"
+
+# Opzioni sshd (se leggibili)
+SSHD_CFG="/etc/ssh/sshd_config"
+PRL="N/A"
+PWA="N/A"
+if [ -r "\$SSHD_CFG" ]; then
+    PRL=\$(grep -iE '^[[:space:]]*PermitRootLogin[[:space:]]+' "\$SSHD_CFG" | tail -n 1 | awk '{print \$2}')
+    PWA=\$(grep -iE '^[[:space:]]*PasswordAuthentication[[:space:]]+' "\$SSHD_CFG" | tail -n 1 | awk '{print \$2}')
+    [ -z "\$PRL" ] && PRL="(default)"
+    [ -z "\$PWA" ] && PWA="(default)"
+fi
+
+# Utenti connessi
+USERS_NOW=\$(who 2>/dev/null | awk '{print \$1}' | sort | uniq | tr '\n' ' ')
+[ -z "\$USERS_NOW" ] && USERS_NOW="nessuno"
+
+# Ultime login SSH OK (ultime 3)
+LAST_SSH_OK=\$(last -n 3 2>/dev/null | awk '/sshd|pts/ && \$1 != "reboot" && \$1 != "wtmp" {print \$1"@"\$3" "\$4" "\$5" "\$6}' | head -n 3)
+[ -z "\$LAST_SSH_OK" ] && LAST_SSH_OK="N/A"
+
+# Tentativi falliti SSH (ultime 24h): prima journalctl, fallback auth.log
+FAIL_24H="N/A"
+if command -v journalctl >/dev/null 2>&1; then
+    FAIL_24H=\$(journalctl -u ssh -u sshd --since "24 hours ago" 2>/dev/null | grep -Ei "Failed password|Invalid user|authentication failure" | wc -l | tr -d ' ')
+fi
+if [ "\$FAIL_24H" = "N/A" ] || [ -z "\$FAIL_24H" ]; then
+    if [ -r /var/log/auth.log ]; then
+        FAIL_24H=\$(grep -Ei "Failed password|Invalid user|authentication failure" /var/log/auth.log 2>/dev/null | wc -l | tr -d ' ')
+    else
+        FAIL_24H="N/A"
+    fi
+fi
+
+clear
+
+cat << "EOBANNER"
+____   ____            .__   __   __      __                  .___
+\   \ /   /____   __ __|  |_/  |_/  \    /  \_____ _______  __| _/____   ____
+ \   Y   /\__  \ |  |  \  |\   __\   \/\/   /\__  \\_  __ \/ __ |/ __ \ /    \
+  \     /  / __ \|  |  /  |_|  |  \        /  / __ \|  | \/ /_/ \  ___/|   |  \
+   \___/  (____  /____/|____/__|   \__/\  /  (____  /__|  \____ |\___  >___|  /
+               \/                       \/        \/           \/    \/     \/
+EOBANNER
+
+echo ""
+echo "    Stato: \$STATUS"
+echo "    Uptime Container: \$UPTIME_STR"
+echo "    Check Esterno (\$EXTERNAL_URL): \$EXT_STATUS"
+echo ""
+
+echo "    CPU Load: \$(uptime | awk -F'load average:' '{ print \$2 }')"
+if command -v free >/dev/null 2>&1; then
+    echo "    RAM Usage: \$(free -h | awk '/Mem:/ {print \$3 \"/\" \$2}')"
+else
+    echo "    RAM Usage: N/A"
+fi
+echo "    Disk Usage: \$(df -h / | awk 'NR==2 {print \$3 \"/\" \$2 \" (\" \$5 \")\"}')"
+echo ""
+
+echo "    Docker: \${DOCKER_VER:-N/A}"
+echo "    Container: running \$RUNNING_C | stopped \$STOPPED_C | total \$TOTAL_C"
+echo "    Vaultwarden Mem: \$VW_MEM"
+echo ""
+
+echo "    SSH Port: \$SSH_PORT"
+echo "    sshd_config: PermitRootLogin=\$PRL | PasswordAuthentication=\$PWA"
+echo "    Logged users: \$USERS_NOW"
+echo "    SSH Failed (24h): \$FAIL_24H"
+echo "    Last SSH logins:"
+echo "\$LAST_SSH_OK" | sed 's/^/      - /'
+echo ""
+EOF
+
+    chmod +x /etc/update-motd.d/99-vaultwarden
+    print_success "Custom MOTD installed at /etc/update-motd.d/99-vaultwarden"
+}
+
+# =============================================================================
 # Command Aliases
 # =============================================================================
 
@@ -1061,6 +1329,11 @@ print_summary() {
     echo "  🔐 Admin Panel: $ACCESS_URL/admin"
     echo "  🔑 Admin Token: Saved in $ADMIN_KEY_FILE"
     echo "  🔌 Port Mapping: external $EXTERNAL_HTTPS_PORT -> internal $INTERNAL_HTTPS_PORT"
+    if [ "$SETUP_CUSTOM_MOTD" = "true" ]; then
+        echo "  🖥️  MOTD: /etc/update-motd.d/99-vaultwarden (enabled)"
+    else
+        echo "  🖥️  MOTD: default scripts disabled, custom MOTD skipped"
+    fi
     echo ""
     echo -e "${YELLOW}${BOLD}⚠ IMPORTANT: Load aliases first!${NC}"
     echo "  Run this command to enable management aliases:"
@@ -1128,6 +1401,7 @@ main() {
     create_systemd_service
     configure_nginx
     configure_firewall
+    setup_custom_motd
     create_aliases
     save_admin_key
     setup_backup
