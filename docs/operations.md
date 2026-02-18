@@ -74,6 +74,16 @@ Nginx test:
 nginx -t
 ```
 
+Inspect active vhosts for your domain:
+```bash
+nginx -T 2>/dev/null | grep -n "server_name vault.example.com"
+```
+
+Check fullchain contains leaf + intermediate:
+```bash
+grep -c "BEGIN CERTIFICATE" /etc/ssl/vaultwarden/your-domain.fullchain.pem
+```
+
 Check if port 8000 is occupied:
 ```bash
 ss -ltnp | grep ':8000'

@@ -1,9 +1,9 @@
 #!/bin/bash
 
 CONTAINER="${CONTAINER:-vaultwarden}"
-MOTD_DOMAIN="${MOTD_DOMAIN:-vault.marmirossi.com}"
-MOTD_INTERNAL_HTTPS_PORT="${MOTD_INTERNAL_HTTPS_PORT:-80}"
-EXTERNAL_URL="${EXTERNAL_URL:-https://${MOTD_DOMAIN}:4443}"
+MOTD_DOMAIN="${MOTD_DOMAIN:-vault.example.com}"
+MOTD_INTERNAL_HTTPS_PORT="${MOTD_INTERNAL_HTTPS_PORT:-443}"
+EXTERNAL_URL="${EXTERNAL_URL:-https://${MOTD_DOMAIN}}"
 
 # Controllo stato container
 if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then

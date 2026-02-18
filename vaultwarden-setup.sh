@@ -35,6 +35,8 @@ DATA_DIR="/var/lib/vaultwarden"
 ENV_FILE="$VAULTWARDEN_DIR/.env"
 SYSTEMD_SERVICE="/etc/systemd/system/vaultwarden.service"
 NGINX_SITE="/etc/nginx/sites-available/vaultwarden"
+NGINX_ENABLED_LINK="/etc/nginx/sites-enabled/vaultwarden.conf"
+NGINX_DISABLED_DIR="/etc/nginx/disabled-sites"
 ALIAS_FILE="/root/.bashrc"
 ALIAS_MARKER_START="# >>> VAULTWARDEN ALIASES START >>>"
 ALIAS_MARKER_END="# <<< VAULTWARDEN ALIASES END <<<"
@@ -204,6 +206,16 @@ validate_certificate_file() {
     fi
 }
 
+validate_fullchain_contains_chain() {
+    local cert_path=$1
+    local cert_count
+    cert_count=$(grep -c "BEGIN CERTIFICATE" "$cert_path" 2>/dev/null || true)
+    if [ -z "$cert_count" ] || [ "$cert_count" -lt 2 ]; then
+        print_error "Certificate chain incomplete in $cert_path (expected leaf + intermediate)"
+        exit 1
+    fi
+}
+
 validate_key_matches_certificate() {
     local key_path=$1
     local cert_path=$2
@@ -301,6 +313,28 @@ validate_output_path_writable() {
     fi
 }
 
+disable_conflicting_nginx_sites() {
+    local domain=$1
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+
+    mkdir -p "$NGINX_DISABLED_DIR"
+    for candidate in /etc/nginx/sites-enabled/*; do
+        [ -e "$candidate" ] || continue
+        if [ "$candidate" = "$NGINX_ENABLED_LINK" ]; then
+            continue
+        fi
+        if [ "$(basename "$candidate")" = "default" ]; then
+            continue
+        fi
+        if grep -qsE "server_name[[:space:]]+$domain;" "$candidate"; then
+            local target="$NGINX_DISABLED_DIR/$(basename "$candidate").disabled.$ts"
+            mv "$candidate" "$target"
+            print_warning "Moved conflicting site: $candidate -> $target"
+        fi
+    done
+}
+
 extract_host_from_url() {
     local url=$1
     echo "$url" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#/.*$##' | sed -E 's#:[0-9]+$##'
@@ -322,7 +356,7 @@ select_setup_mode() {
     echo ""
     echo "Setup Mode:"
     echo "  1) Full setup (install/configure everything)"
-    echo "  2) Commands only (update aliases + vw-help only)"
+    echo "  2) Commands only (update aliases + vw-help + vw-edit-config)"
     read -p "Select setup mode [1-2]: " setup_mode_input
     setup_mode_input=$(echo "$setup_mode_input" | tr -d '\r' | xargs)
     while [[ ! "$setup_mode_input" =~ ^[1-2]$ ]]; do
@@ -403,6 +437,16 @@ validate_nginx_config_matches_inputs() {
 
     if ! grep -qF "proxy_pass http://127.0.0.1:8000;" "$NGINX_SITE"; then
         print_error "Nginx config mismatch: proxy_pass must target 127.0.0.1:8000"
+        exit 1
+    fi
+
+    if ! grep -qF "/notifications/anonymous-hub" "$NGINX_SITE"; then
+        print_error "Nginx config mismatch: anonymous-hub websocket path missing"
+        exit 1
+    fi
+
+    if ! grep -qF "proxy_http_version 1.1;" "$NGINX_SITE"; then
+        print_error "Nginx config mismatch: proxy_http_version 1.1 missing for websockets"
         exit 1
     fi
 
@@ -664,6 +708,7 @@ get_user_input() {
         read -e -p "Path to existing fullchain certificate: " EXISTING_CERT_PATH
         EXISTING_CERT_PATH=$(ensure_file_exists "$EXISTING_CERT_PATH" "certificate file")
         validate_certificate_file "$EXISTING_CERT_PATH"
+        validate_fullchain_contains_chain "$EXISTING_CERT_PATH"
         validate_certificate_covers_domain "$EXISTING_CERT_PATH" "$DOMAIN"
         read -e -p "Path to existing private key: " EXISTING_KEY_PATH
         EXISTING_KEY_PATH=$(ensure_file_exists "$EXISTING_KEY_PATH" "private key")
@@ -840,6 +885,7 @@ setup_certificates() {
             SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
             SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
             validate_certificate_file "$SSL_CERT"
+            validate_fullchain_contains_chain "$SSL_CERT"
             validate_private_key_file "$SSL_KEY"
             validate_key_matches_certificate "$SSL_KEY" "$SSL_CERT"
             validate_certificate_covers_domain "$SSL_CERT" "$DOMAIN"
@@ -857,6 +903,7 @@ setup_certificates() {
         SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
         SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
         validate_certificate_file "$SSL_CERT"
+        validate_fullchain_contains_chain "$SSL_CERT"
         validate_private_key_file "$SSL_KEY"
         validate_key_matches_certificate "$SSL_KEY" "$SSL_CERT"
         validate_certificate_covers_domain "$SSL_CERT" "$DOMAIN"
@@ -972,6 +1019,7 @@ EOF
         print_info "Place the signed wildcard fullchain at: $WILDCARD_CERT_PATH"
         WILDCARD_CERT_PATH=$(wait_for_existing_file "$WILDCARD_CERT_PATH" "signed certificate/fullchain")
         validate_certificate_file "$WILDCARD_CERT_PATH"
+        validate_fullchain_contains_chain "$WILDCARD_CERT_PATH"
         validate_key_matches_certificate "$WILDCARD_KEY_PATH" "$WILDCARD_CERT_PATH"
         validate_certificate_covers_domain "$WILDCARD_CERT_PATH" "$DOMAIN"
         validate_certificate_covers_domain "$WILDCARD_CERT_PATH" "*.$WILDCARD_BASE_DOMAIN"
@@ -989,6 +1037,7 @@ EOF
             print_info "Signed fullchain already in final output path."
         fi
         chmod 600 "$WILDCARD_FULLCHAIN_PATH"
+        validate_fullchain_contains_chain "$WILDCARD_FULLCHAIN_PATH"
 
         SSL_CERT="$WILDCARD_FULLCHAIN_PATH"
         SSL_KEY="$WILDCARD_KEY_PATH"
@@ -1000,6 +1049,7 @@ EOF
     SSL_CERT="$MANUAL_CERT_DIR/$(basename "$EXISTING_CERT_PATH")"
     SSL_KEY="$MANUAL_CERT_DIR/$(basename "$EXISTING_KEY_PATH")"
     validate_certificate_file "$EXISTING_CERT_PATH"
+    validate_fullchain_contains_chain "$EXISTING_CERT_PATH"
     validate_private_key_file "$EXISTING_KEY_PATH"
     validate_key_matches_certificate "$EXISTING_KEY_PATH" "$EXISTING_CERT_PATH"
     validate_certificate_covers_domain "$EXISTING_CERT_PATH" "$DOMAIN"
@@ -1169,14 +1219,24 @@ server {
         proxy_set_header X-Forwarded-Proto \\\$scheme;
     }
 
-    location /notifications/hub {
+    location ~ ^/notifications/(hub|anonymous-hub)\$ {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
         proxy_set_header Upgrade \\\$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 
-    location /notifications/hub/negotiate {
+    location ~ ^/notifications/(hub|anonymous-hub)/negotiate\$ {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
     }
 }
 EOF
@@ -1211,22 +1271,34 @@ server {
         proxy_set_header X-Forwarded-Proto \\\$scheme;
     }
 
-    location /notifications/hub {
+    location ~ ^/notifications/(hub|anonymous-hub)\$ {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
         proxy_set_header Upgrade \\\$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 
-    location /notifications/hub/negotiate {
+    location ~ ^/notifications/(hub|anonymous-hub)/negotiate\$ {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
     }
 }
 EOF
     fi
 
     # Enable site
-    ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/
+    ln -sf "$NGINX_SITE" "$NGINX_ENABLED_LINK"
+    rm -f /etc/nginx/sites-enabled/vaultwarden
     rm -f /etc/nginx/sites-enabled/default
+    disable_conflicting_nginx_sites "$DOMAIN"
 
     # Validate generated config against user inputs
     validate_nginx_config_matches_inputs
@@ -1522,6 +1594,8 @@ set -euo pipefail
 
 ENV_FILE="$ENV_FILE"
 NGINX_SITE="$NGINX_SITE"
+NGINX_ENABLED_LINK="$NGINX_ENABLED_LINK"
+NGINX_DISABLED_DIR="$NGINX_DISABLED_DIR"
 DEFAULT_DOMAIN="$DOMAIN"
 DEFAULT_EXTERNAL_PORT="$EXTERNAL_HTTPS_PORT"
 DEFAULT_INTERNAL_PORT="$INTERNAL_HTTPS_PORT"
@@ -1602,6 +1676,30 @@ current_ssl_key() {
     grep -E '^\\s*ssl_certificate_key\\s+' "\$NGINX_SITE" | head -n 1 | awk '{print \$2}' | tr -d ';'
 }
 
+validate_fullchain_contains_chain() {
+    local cert_path=\$1
+    local cert_count
+    cert_count=\$(grep -c "BEGIN CERTIFICATE" "\$cert_path" 2>/dev/null || true)
+    [ -n "\$cert_count" ] && [ "\$cert_count" -ge 2 ] || die "Incomplete fullchain in \$cert_path (expected leaf + intermediate)"
+}
+
+disable_conflicting_sites_for_domain() {
+    local domain=\$1
+    local ts
+    ts=\$(date +%Y%m%d-%H%M%S)
+    mkdir -p "\$NGINX_DISABLED_DIR"
+
+    for candidate in /etc/nginx/sites-enabled/*; do
+        [ -e "\$candidate" ] || continue
+        [ "\$candidate" = "\$NGINX_ENABLED_LINK" ] && continue
+        [ "\$(basename "\$candidate")" = "default" ] && continue
+
+        if grep -qsE "server_name[[:space:]]+\${domain};" "\$candidate"; then
+            mv "\$candidate" "\$NGINX_DISABLED_DIR/\$(basename "\$candidate").disabled.\$ts"
+        fi
+    done
+}
+
 write_nginx_config() {
     local domain=\$1
     local external_port=\$2
@@ -1638,14 +1736,24 @@ server {
         proxy_set_header X-Forwarded-Proto \\\$scheme;
     }
 
-    location /notifications/hub {
+    location ~ ^/notifications/(hub|anonymous-hub) {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
         proxy_set_header Upgrade \\\$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 
-    location /notifications/hub/negotiate {
+    location ~ ^/notifications/(hub|anonymous-hub)/negotiate {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
     }
 }
 EONG
@@ -1680,14 +1788,24 @@ server {
         proxy_set_header X-Forwarded-Proto \\\$scheme;
     }
 
-    location /notifications/hub {
+    location ~ ^/notifications/(hub|anonymous-hub) {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
         proxy_set_header Upgrade \\\$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 
-    location /notifications/hub/negotiate {
+    location ~ ^/notifications/(hub|anonymous-hub)/negotiate {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
     }
 }
 EONG
@@ -1836,11 +1954,16 @@ main() {
     ssl_key=\$(current_ssl_key)
     [ -f "\$ssl_cert" ] || die "SSL certificate file not found: \$ssl_cert"
     [ -f "\$ssl_key" ] || die "SSL key file not found: \$ssl_key"
+    validate_fullchain_contains_chain "\$ssl_cert"
 
     backup_file="\$NGINX_SITE.bak.\$(date +%Y%m%d-%H%M%S)"
     cp "\$NGINX_SITE" "\$backup_file"
 
     write_nginx_config "\$domain" "\$external_port" "\$internal_port" "\$ssl_cert" "\$ssl_key"
+    ln -sf "\$NGINX_SITE" "\$NGINX_ENABLED_LINK"
+    rm -f /etc/nginx/sites-enabled/vaultwarden
+    rm -f /etc/nginx/sites-enabled/default
+    disable_conflicting_sites_for_domain "\$domain"
 
     if ! nginx -t >/dev/null 2>&1; then
         cp "\$backup_file" "\$NGINX_SITE"

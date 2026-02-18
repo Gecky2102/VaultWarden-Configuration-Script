@@ -1,6 +1,5 @@
 # Certificate Modes
 
-The installer supports three certificate modes.
 The installer supports four certificate modes.
 
 ## Mode 1: Let's Encrypt (single domain, automatic)
@@ -54,6 +53,7 @@ Before continuing, the script validates:
 - CSR format (when wildcard flow is used)
 - CSR required subject fields (`C`, `ST`, `L`, `O`)
 - certificate format
+- certificate chain completeness (`fullchain` must contain at least 2 certs: leaf + intermediate)
 - key/certificate match
 - domain format and email format
 - certificate domain coverage (CN/SAN) for the configured domain
