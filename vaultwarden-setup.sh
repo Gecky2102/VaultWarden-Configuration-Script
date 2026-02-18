@@ -328,7 +328,8 @@ disable_conflicting_nginx_sites() {
             continue
         fi
         if grep -qsE "server_name[[:space:]]+$domain;" "$candidate"; then
-            local target="$NGINX_DISABLED_DIR/$(basename "$candidate").disabled.$ts"
+            local target
+            target="$NGINX_DISABLED_DIR/$(basename "$candidate").disabled.$ts"
             mv "$candidate" "$target"
             print_warning "Moved conflicting site: $candidate -> $target"
         fi
